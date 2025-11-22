@@ -1,5 +1,5 @@
 """
-Module handles a MplCanvas class for 3D plotting.
+Module handles a VisualizationCanvas class for 3D plotting.
 """
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -14,14 +14,23 @@ class VisualizationCanvas(FigureCanvasQTAgg):
     """
 
     def __init__(self, parent=None, width=5, height=5, dpi=100):
+        """
+        Initialize the visualization canvas.
+
+        Args:
+            parent: Parent widget
+            width: Figure width in inches
+            height: Figure height in inches
+            dpi: Dots per inch (resolution)
+        """
         self.fig = Figure(figsize=(width, height), dpi=dpi)
         self.ax = self.fig.add_subplot(111, projection="3d")
         super().__init__(self.fig)
         self.setParent(parent)
         self._apply_canvas_plot_style()
         self.fig.tight_layout()
-        # Set focus policy so canvas can receive mouse events
-        self.setFocusPolicy(Qt.StrongFocus)
+        # set focus policy to click focus
+        self.setFocusPolicy(Qt.ClickFocus)
 
     def _apply_canvas_plot_style(self):
         # Set canvas (figure) background

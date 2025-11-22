@@ -27,7 +27,7 @@ class FIBPlotGroupBox(QGroupBox):
 
     def _create_components(self):
         # create plot canvas
-        self.canvas = VisualizationCanvas(parent=self, width=5, height=5, dpi=100)
+        self.canvas = VisualizationCanvas(parent=self, width=8, height=8, dpi=100)
         # Create legend labels
         self.legend_sem_line = QLabel("■")
         self.legend_sem = QLabel("SEM")
