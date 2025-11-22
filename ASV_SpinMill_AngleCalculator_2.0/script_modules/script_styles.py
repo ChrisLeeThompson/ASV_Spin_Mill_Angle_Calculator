@@ -16,6 +16,10 @@ class StyleColors:
     INPUT_BG = "#3d5462"
     INPUT_BORDER = "#476273"
     INPUT_FOCUS = "#2980b9"
+    THREE_DIM_SEM_COLOR = "#8A939A"
+    THREE_DIM_FIB_COLOR = "#000000"
+    THREE_DIM_ELLIPSE_COLOR = "#65C1FF"
+    THREE_DIM_LABEL_COLOR = "#8A939A"
 
 
 class StyleDimensions:
@@ -61,6 +65,67 @@ class GroupBoxStyles:
                 background-color: {StyleColors.MAIN_BG};
                 padding: {StyleDimensions.PADDING};
                 margin: {StyleDimensions.MARGIN};
+            }}
+        """
+
+
+class TabsStyles:
+
+    @staticmethod
+    def tabs() -> str:
+        return f"""
+            QTabWidget::pane {{
+                border: 1px solid {StyleColors.MAIN_BG};
+                background-color: {StyleColors.MAIN_BG};
+            }}
+            QTabBar::tab {{
+                background: {StyleColors.MAIN_BG};
+                font-size: {StyleDimensions.FONT_SIZE_NORMAL};
+            }}
+            QTabBar::tab:hover {{
+                color: {StyleColors.BUTTON_HOVER};
+            }}
+            QTabBar::tab:selected {{
+                background-color: {StyleColors.GROUPBOX_GB};
+                margin: {StyleDimensions.MARGIN};
+                padding: 10px;
+            }}
+        """
+
+
+class ButtonStyles:
+    """
+    Styles for the push buttons.
+    """
+
+    @staticmethod
+    def default() -> str:
+        return f"""
+            QPushButton {{
+                background-color: {StyleColors.BUTTON_BG};
+                color: {StyleColors.TEXT_PRIMARY};
+                border-radius: {StyleDimensions.BORDER_RADIUS_SMALL};
+                margin: {StyleDimensions.MARGIN};
+                padding: 10px;
+                font-size: {StyleDimensions.FONT_SIZE_NORMAL};
+            }}
+            QPushButton:hover {{
+                background-color: {StyleColors.BUTTON_HOVER};
+            }}
+            QPushButton:pressed {{
+                background-color: {StyleColors.BUTTON_PRESSED};
+            }}
+            QPushButton:disabled {{
+                background-color: {StyleColors.BUTTON_DISABLED};
+                color: {StyleColors.TEXT_DISABLED};
+            }}
+            QToolTip {{
+                background-color: {StyleColors.BUTTON_BG};
+                color: {StyleColors.TEXT_PRIMARY};
+                /*border: 1px solid #ffffff;*/
+                border-radius: {StyleDimensions.BORDER_RADIUS_SMALL};
+                padding: {StyleDimensions.PADDING};
+                font-size: {StyleDimensions.FONT_SIZE_NORMAL};
             }}
         """
 
@@ -142,6 +207,17 @@ class LabelStyles:
             }}
         """
 
+    @staticmethod
+    def legend() -> str:
+        return f"""
+            QLabel {{
+                color: {StyleColors.TEXT_PRIMARY};
+                font-size: {StyleDimensions.FONT_SIZE_NORMAL};
+                background: transparent;
+                margin-right: {StyleDimensions.MARGIN};
+            }}
+        """
+
 
 class AppStyles:
 
@@ -149,5 +225,7 @@ class AppStyles:
     Dimensions = StyleDimensions
     MainWindow = MainWindowStyles
     GroupBox = GroupBoxStyles
+    Tab = TabsStyles
+    Button = ButtonStyles
     SpinBox = SpinBoxStyles
     Label = LabelStyles

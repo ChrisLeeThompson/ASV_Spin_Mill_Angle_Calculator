@@ -138,7 +138,6 @@ class FIBGroupBox(QGroupBox):
         # calculated milling angle
         layout.addWidget(self.calculated_milling_angle_label, 4, 0)
         layout.addWidget(self.calculated_milling_angle_result, 4, 1)
-
         # tilt stage by
         layout.addWidget(self.tilt_stage_by_label, 5, 0)
         layout.addWidget(self.tilt_stage_by_result, 5, 1)
