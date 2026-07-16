@@ -1,0 +1,14 @@
+module Components
+Card 1.0 Card.qml
+ConfirmDialog 1.0 ConfirmDialog.qml
+PositionResultsTable 1.0 PositionResultsTable.qml
+SemPositionsTable 1.0 SemPositionsTable.qml
+SideBar 1.0 SideBar.qml
+StatusBar 1.0 StatusBar.qml
+StatusLogView 1.0 StatusLogView.qml
+CustomSpinBox 1.0 CustomSpinBox.qml
+ToolTippedLabel 1.0 ToolTippedLabel.qml
+Fib2DView 1.0 Fib2DView.qml
+FibFIBView 1.0 FibFIBView.qml
+FibImageViewer 1.0 FibImageViewer.qml
+SpinMillPositionsTable 1.0 SpinMillPositionsTable.qml
