@@ -239,6 +239,7 @@ class PositionAlignmentController(QObject):
         self._status_log_lines: list = []
         self._frame_seq = 0
         self._ellipse_fit: dict = {}
+        self._last_run_warnings: list = []
         # Inputs (Binding-pushed from QML; snapshotted at Start)
         self._target_milling_angle = 4.0
         self._aoi_diameter_um = 800.0
@@ -301,6 +302,12 @@ class PositionAlignmentController(QObject):
     def statusLog(self) -> str:
         """Session scrollback for the Status Log card (newest last)."""
         return "\n".join(self._status_log_lines)
+
+    @Property("QVariantList", notify=changed)
+    def lastRunWarnings(self) -> list:
+        """Advisories from the last finished run (width mismatch,
+        mid-run re-anchor, ...) — the viewer's advisory chip."""
+        return self._last_run_warnings
 
     def _log(self, line: str) -> None:
         self._status_log_lines.append(line)
@@ -397,6 +404,7 @@ class PositionAlignmentController(QObject):
         worker.finished.connect(self._on_worker_finished)
 
         self._aligned_ready = False  # a new run consumes the review state
+        self._last_run_warnings = []
         self._run_state = _RUN_RUNNING
         self._viewer_state = STATE_RUNNING
         self._status_text = "Starting alignment..."
@@ -529,6 +537,7 @@ class PositionAlignmentController(QObject):
         self._viewer_state = _VIEWER_STATE_BY_OUTCOME[result.outcome]
         self._aligned_ready = result.outcome == AlignmentOutcome.ALIGNED
         self._status_text = result.message
+        self._last_run_warnings = list(result.warnings)
         self._log(result.message)
         self.changed.emit()
         self.statusUpdated.emit(result.message)

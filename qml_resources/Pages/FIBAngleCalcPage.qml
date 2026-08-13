@@ -140,7 +140,7 @@ Item {
                         // height below the diameter so the asin ratio stays
                         // < 1. Shrinking the diameter re-clamps this box.
                         floatTo: Math.max(measuredEllipseHeightSB.floatFrom, aoiDiameterSB.value - 0.1)
-                        floatStep: 1.0
+                        floatStep: 0.1
                         floatValue: 55.8
 
                     }

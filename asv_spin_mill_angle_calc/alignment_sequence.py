@@ -13,13 +13,22 @@ Flow (see .claude/position_alignment_design.md for the requirements):
 3.  SEARCH   — detect at the current tilt (ASV already tilted to the
     milling angle); if not found, walk tilt toward 0 in small steps
     (a fatter ellipse is easier to detect; never more negative),
-    capped at the detector's angle ceiling. A failed sweep gets one
+    capped at the detector's angle ceiling. The sample-planarity
+    anchor requires TWO consistent fits (same center and width,
+    angles tracking stage tilt 1:1) — one clutter fit can no longer
+    poison the run — and once confirmed, the MEASURED ring width
+    becomes the working width (mismatch with the entered AOI is an
+    operator advisory, not a rejection). A failed sweep gets one
     auto-C/B + HFW-escalation rescue and a second sweep; both failing
     is NOT_FOUND.
 4.  CONVERGE — center (stage x/y), level (FIB scan rotation until the
-    ellipse is horizontal), walk tilt to the target and close the loop
-    on the measured angle (correcting sample planarity), re-center,
-    and optionally trim with ion-beam shift.
+    ellipse is horizontal; once the ring has been SEEN level, later
+    larger tilt readings are noise and leveling stays off), walk tilt
+    to the target and close the loop on the measured angle
+    (correcting sample planarity), re-center, and optionally trim
+    with ion-beam shift. Losing detection mid-run triggers a bounded
+    in-place re-anchor (fresh 2-frame lock at the wide window) before
+    giving up.
 5.  RESTORE  — walk HFW back if the search escalated it. Scan rotation
     is deliberately NOT restored: it is the product ASV logs.
 6.  VERIFY   — two consecutive fresh frames with angle, centering and
@@ -36,13 +45,18 @@ external interference.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from asv_spin_mill_angle_calc.alignment_config import (
@@ -51,6 +65,7 @@ from asv_spin_mill_angle_calc.alignment_config import (
 )
 from asv_spin_mill_angle_calc.ellipse_detector import (
     EllipseFit,
+    ExpectedGeometry,
     FiducialEllipseDetector,
 )
 from asv_spin_mill_angle_calc.microscope_ops import FibFrame, MicroscopeOps
@@ -60,6 +75,16 @@ from asv_spin_mill_angle_calc.spin_mill_geometry import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Environment override for AlignmentConfig.debug_frames_dir (takes
+# precedence when set, so debug capture can be enabled without a code
+# or config change on the support PC).
+ASV_DEBUG_ENV = "ASV_DEBUG_FRAMES_DIR"
+
+# Headroom for the ring's intrinsic in-plane rotation when bounding the
+# detector's tilt search (measured +0.14 deg on the 2026-08 corpus; the
+# bound additionally grows with the applied scan rotation).
+_INTRINSIC_RING_TILT_HEADROOM_DEG = 2.0
 
 # on_frame callback: (image, fit or None, pixel_size_m) per grabbed frame.
 FrameCallback = Callable[[np.ndarray, Optional[EllipseFit], float], None]
@@ -94,6 +119,10 @@ class AlignmentResult:
     frames_grabbed: int = 0
     tilt_moves: int = 0
     center_moves: int = 0
+    # Operator advisories collected during the run (width mismatch,
+    # mid-run re-anchor, ...) — attached to every outcome, so a failed
+    # run still tells the operator what was tried.
+    warnings: Tuple[str, ...] = ()
 
 
 # --- Internal control-flow exceptions (never escape run()) -----------------
@@ -116,6 +145,87 @@ class _TiltLimit(Exception):
 
 class _NotConverged(Exception):
     pass
+
+
+class _Reacquired(Exception):
+    """Mid-run re-anchor succeeded: convergence must restart from the
+    fresh lock (sign probes and iteration counters hold pre-blackout
+    history that is no longer meaningful). Consumed in _run_inner;
+    bounded by reanchor_budget."""
+
+    def __init__(self, fit: EllipseFit) -> None:
+        super().__init__("re-anchored")
+        self.fit = fit
+
+
+@dataclass(frozen=True)
+class _AnchorObservation:
+    """One gate-passing fit, in anchor-relevant coordinates."""
+    fit: EllipseFit
+    tilt_deg: float      # stage tilt when measured
+    offset_deg: float    # measured milling angle - open-loop model
+    width_um: float      # measured ring width (0 when unknown)
+
+
+class _PlanarityAnchor:
+    """Two-frame-verified sample-planarity anchor.
+
+    Run 1 of the 2026-08 hardware test died from anchor poisoning: ONE
+    unverified clutter fit anchored the offset at -2.97 deg and the
+    tracking window then excluded the true ring for the rest of the
+    run. The anchor now requires two consistent observations: same
+    center, same semi-major axis, and measured angles moving 1:1 with
+    stage tilt (a static clutter structure across a 1 deg sweep step
+    shows slope 0 and fails the third check).
+    """
+
+    def __init__(self, center_tolerance_px: float,
+                 axis_tolerance_frac: float,
+                 angle_tolerance_deg: float) -> None:
+        self._center_tolerance_px = center_tolerance_px
+        self._axis_tolerance_frac = axis_tolerance_frac
+        self._angle_tolerance_deg = angle_tolerance_deg
+        self.offset_deg: Optional[float] = None
+        self._candidate: Optional[_AnchorObservation] = None
+
+    def observe(self, observation: _AnchorObservation
+                ) -> Optional[Tuple[_AnchorObservation,
+                                    _AnchorObservation]]:
+        """Feed one gate-passing fit; returns the confirming pair when
+        this observation establishes the anchor, else None. An
+        inconsistent observation replaces the candidate (the newest
+        evidence wins — a stale candidate must not block forever)."""
+        if self.offset_deg is not None:
+            return None
+        if (self._candidate is not None
+                and self._consistent(self._candidate, observation)):
+            pair = (self._candidate, observation)
+            self.offset_deg = (self._candidate.offset_deg
+                               + observation.offset_deg) / 2.0
+            self._candidate = None
+            return pair
+        self._candidate = observation
+        return None
+
+    def reset(self) -> None:
+        self.offset_deg = None
+        self._candidate = None
+
+    def _consistent(self, a: _AnchorObservation,
+                    b: _AnchorObservation) -> bool:
+        center_px = math.hypot(b.fit.center_x_px - a.fit.center_x_px,
+                               b.fit.center_y_px - a.fit.center_y_px)
+        if center_px > self._center_tolerance_px:
+            return False
+        axis_frac = (abs(b.fit.semi_major_px - a.fit.semi_major_px)
+                     / max(a.fit.semi_major_px, 1e-9))
+        if axis_frac > self._axis_tolerance_frac:
+            return False
+        # 1:1 slope check: measured angle must move with stage tilt.
+        slope_residual_deg = abs(
+            (b.fit.milling_angle_deg - a.fit.milling_angle_deg)
+            - (b.tilt_deg - a.tilt_deg))
+        return slope_residual_deg <= self._angle_tolerance_deg
 
 
 class _SignProbe:
@@ -150,13 +260,16 @@ class AlignmentSequence:
     def __init__(self, ops: MicroscopeOps, params: AlignmentParams,
                  config: AlignmentConfig = DEFAULT_ALIGNMENT_CONFIG,
                  detect: Optional[
-                     Callable[[np.ndarray], Optional[EllipseFit]]] = None,
+                     Callable[..., Tuple[EllipseFit, ...]]] = None,
                  ) -> None:
+        # detect(image, expected) returns per-polarity candidate fits,
+        # best score first; the sequence gates them in order and acts
+        # on the first acceptable one.
         self._ops = ops
         self._params = params
         self._cfg = config
         self._detect = detect or FiducialEllipseDetector(
-            config.detector).detect
+            config.detector).detect_all
         # Run state
         self._stop_event: threading.Event = threading.Event()
         self._on_status: StatusCallback = lambda text: None
@@ -171,6 +284,27 @@ class AlignmentSequence:
         self._frames = 0
         self._tilt_moves = 0
         self._center_moves = 0
+        # Sample-planarity offset (measured - model), anchored once TWO
+        # consistent observations confirm the lock.
+        self._anchor = _PlanarityAnchor(
+            config.anchor_center_tolerance_px,
+            config.anchor_axis_tolerance_frac,
+            config.anchor_angle_tolerance_deg)
+        self._reanchors_used = 0
+        # Ring width the run tracks: the entered AOI diameter until the
+        # anchor confirms, the measured width afterwards (user
+        # decision: report mismatches instead of rejecting the run).
+        self._working_aoi_diameter_um = params.aoi_diameter_um
+        # Leveling latch: once the ring has been SEEN level, later
+        # larger tilt readings are noise, never "corrected".
+        self._level_established = False
+        self._warnings: list = []
+        # Debug frame capture (env override beats the config field)
+        debug_dir = os.environ.get(ASV_DEBUG_ENV) or config.debug_frames_dir
+        self._debug_dir: Optional[Path] = Path(debug_dir) if debug_dir \
+            else None
+        self._debug_run_dir: Optional[Path] = None
+        self._debug_frames_written = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -183,6 +317,9 @@ class AlignmentSequence:
         self._stop_event = stop_event
         self._on_status = on_status
         self._on_frame = on_frame
+        if self._debug_dir is not None:
+            self._debug_run_dir = (self._debug_dir
+                                   / time.strftime("%Y%m%d-%H%M%S"))
         try:
             return self._run_inner()
         except _Stop:
@@ -205,6 +342,9 @@ class AlignmentSequence:
                 f"{self._phase_label} failed (see console log)")
         finally:
             self._restore_hfw_best_effort()
+            if self._debug_frames_written:
+                logger.info("Debug capture: %d frame(s) written to %s",
+                            self._debug_frames_written, self._debug_run_dir)
 
     # ------------------------------------------------------------------
     # Main flow
@@ -215,9 +355,18 @@ class AlignmentSequence:
         self._checks(target_deg)
         self._setup()
         fit = self._search()
-        for round_index in range(1, self._cfg.verify_rounds + 1):
-            fit = self._converge(fit, target_deg)
-            verified, fit, detail = self._verify(target_deg)
+        round_index = 1
+        while round_index <= self._cfg.verify_rounds:
+            try:
+                fit = self._converge(fit, target_deg)
+                verified, fit, detail = self._verify(target_deg)
+            except _Reacquired as reacquired:
+                # Fresh 2-frame lock after a mid-run blackout: restart
+                # convergence cleanly (probes/counters reset) without
+                # consuming a verify round. Bounded by reanchor_budget,
+                # which was spent before this could be raised.
+                fit = reacquired.fit
+                continue
             if verified:
                 return self._result(
                     AlignmentOutcome.ALIGNED,
@@ -226,6 +375,7 @@ class AlignmentSequence:
                     fit)
             logger.info("Verification round %d failed: %s",
                         round_index, detail)
+            round_index += 1
         raise _NotConverged(
             f"Alignment did not verify ({detail}) — see console log")
 
@@ -308,11 +458,15 @@ class AlignmentSequence:
                 self._check_stop()
                 self._ops.imaging.run_auto_cb()
                 self._escalate_hfw()
+                # Pixel size and geometry change with the field of
+                # view: a pending anchor candidate is meaningless.
+                self._anchor.reset()
                 self._tilt_absolute(start_tilt_deg)
             fit = self._sweep_once(start_tilt_deg, sweep)
             if fit is not None:
                 self._status(
-                    f"Ellipse found at {fit.milling_angle_deg:.2f}° "
+                    f"Ellipse found and confirmed at "
+                    f"{fit.milling_angle_deg:.2f}° "
                     f"(stage tilt {self._tilt_deg:.1f}°)")
                 return fit
         raise _NotFound(
@@ -321,6 +475,12 @@ class AlignmentSequence:
 
     def _sweep_once(self, start_tilt_deg: float,
                     sweep: int) -> Optional[EllipseFit]:
+        """One tilt-toward-0 sweep; returns an ANCHOR-CONFIRMED fit or
+        None. A single accepted fit only records an anchor candidate;
+        up to two same-tilt confirmation grabs (no stage motion) try to
+        confirm it immediately, and otherwise the candidate rides along
+        to the next sweep step, where the 1:1 angle/tilt slope check
+        does the discriminating."""
         cfg = self._cfg
         tilt_deg = start_tilt_deg
         while True:
@@ -328,7 +488,13 @@ class AlignmentSequence:
                          f"looking at stage tilt {tilt_deg:.1f}°...")
             fit = self._measure_once()
             if fit is not None:
-                return fit
+                if self._observe_for_anchor(fit):
+                    return fit
+                for _ in range(2):  # same-tilt confirmation grabs
+                    confirm = self._measure_once()
+                    if confirm is not None \
+                            and self._observe_for_anchor(confirm):
+                        return confirm
             next_tilt_deg = tilt_deg + cfg.sweep_step_deg
             next_angle_deg = (next_tilt_deg
                               + FIB_ANGLE_FROM_STAGE_PLANE_DEG)
@@ -337,8 +503,59 @@ class AlignmentSequence:
             self._tilt_absolute(next_tilt_deg)
             tilt_deg = next_tilt_deg
 
+    def _observe_for_anchor(self, fit: EllipseFit) -> bool:
+        """Feed a gate-passing fit to the anchor; True when it
+        establishes the 2-frame-confirmed lock."""
+        model_deg = self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
+        width_um = 0.0
+        if self._last_pixel_size_m > 0:
+            width_um = (2.0 * fit.semi_major_px
+                        * self._last_pixel_size_m * 1e6)
+        pair = self._anchor.observe(_AnchorObservation(
+            fit=fit, tilt_deg=self._tilt_deg,
+            offset_deg=fit.milling_angle_deg - model_deg,
+            width_um=width_um))
+        if pair is None:
+            return False
+        self._finalize_anchor(pair)
+        return True
+
+    def _finalize_anchor(self, pair: Tuple[_AnchorObservation,
+                                           _AnchorObservation]) -> None:
+        """Adopt the confirmed lock: log the offset, switch the run to
+        the measured (working) ring width, and advise the operator when
+        it disagrees with the entered AOI diameter."""
+        logger.info(
+            "Planarity offset anchored at %+.2f deg (2-frame confirmed: "
+            "%+.2f and %+.2f deg)", self._anchor.offset_deg,
+            pair[0].offset_deg, pair[1].offset_deg)
+        entered_um = self._params.aoi_diameter_um
+        if entered_um <= 0 or pair[0].width_um <= 0:
+            return
+        working_um = (pair[0].width_um + pair[1].width_um) / 2.0
+        self._working_aoi_diameter_um = working_um
+        mismatch_frac = abs(working_um - entered_um) / entered_um
+        if mismatch_frac > self._cfg.aoi_width_advisory_frac:
+            self._warn(
+                f"Measured AOI width ≈ {working_um:.0f} µm differs "
+                f"from the entered {entered_um:.0f} µm by "
+                f"{mismatch_frac * 100:.0f}% — tracking the measured "
+                "width")
+
     def _escalate_hfw(self) -> None:
-        new_hfw_m = self._expected_hfw_m * self._cfg.hfw_escalation_factor
+        """Zoom out for the second sweep, but never past the AOI
+        detection band: beyond D/HFW = aoi_hfw_fit_min the ellipse
+        falls below the detector's semi-major prior and the sweep
+        could not succeed by construction."""
+        cfg = self._cfg
+        new_hfw_m = self._expected_hfw_m * cfg.hfw_escalation_factor
+        aoi_m = self._params.aoi_diameter_um * 1e-6
+        if aoi_m > 0:
+            new_hfw_m = min(new_hfw_m, aoi_m / cfg.aoi_hfw_fit_min)
+        if new_hfw_m <= self._expected_hfw_m * 1.01:
+            logger.info("HFW already at the AOI detection-band limit; "
+                        "next sweep runs without escalation")
+            return
         logger.info("Escalating HFW %.1f um -> %.1f um for the next sweep",
                     self._expected_hfw_m * 1e6, new_hfw_m * 1e6)
         self._ops.ion_beam.set_horizontal_field_width_m(new_hfw_m)
@@ -403,11 +620,25 @@ class AlignmentSequence:
 
     def _level_loop(self, fit: EllipseFit) -> EllipseFit:
         cfg = self._cfg
+        if self._level_established:
+            return fit
         self._phase("Scan-rotation leveling",
                     "Leveling the ellipse with FIB scan rotation...")
         probe = _SignProbe("Scan-rotation leveling", cfg.level_sign)
         previous: Optional[float] = None
         for _ in range(cfg.level_max_iterations):
+            if abs(fit.tilt_deg) <= cfg.level_noise_floor_deg:
+                # The ring has been SEEN level. Its plane rotation
+                # cannot change unless we rotate the scan, so leveling
+                # is done for this run: later larger readings are
+                # measurement noise, and "correcting" them injects
+                # real tilt (exactly what the 2026-08 run 1 did).
+                self._level_established = True
+                logger.info(
+                    "Ellipse is level (tilt %.2f deg ≤ %.2f noise "
+                    "floor); scan-rotation leveling disabled for this "
+                    "run", fit.tilt_deg, cfg.level_noise_floor_deg)
+                return fit
             if abs(fit.tilt_deg) <= cfg.level_tolerance_deg:
                 return fit
             probe.check(previous, abs(fit.tilt_deg), 0.1)
@@ -432,14 +663,39 @@ class AlignmentSequence:
                     "Walking stage tilt to the target milling angle...")
         model_tilt_deg = stage_tilt_for_milling_angle_deg(target_deg)
         # Open-loop walk in bounded steps, keeping the ellipse in view.
-        while abs(model_tilt_deg - self._tilt_deg) > 1e-6:
-            step_deg = _clamp(model_tilt_deg - self._tilt_deg,
-                              cfg.tilt_walk_step_deg)
+        # The exit epsilon must be at least the read-back tolerance:
+        # _tilt_absolute assigns the stage READ-BACK to self._tilt_deg,
+        # accepting up to tilt_readback_tolerance_deg of deviation — a
+        # tighter epsilon re-commands the same tilt forever. The cap and
+        # stall guard break to the closed loop, which owns convergence.
+        epsilon_deg = max(cfg.tilt_readback_tolerance_deg, 0.02)
+        max_steps = math.ceil(abs(model_tilt_deg - self._tilt_deg)
+                              / cfg.tilt_walk_step_deg) + 2
+        for _ in range(max_steps):
+            remaining_deg = model_tilt_deg - self._tilt_deg
+            if abs(remaining_deg) <= epsilon_deg:
+                break
+            step_deg = _clamp(remaining_deg, cfg.tilt_walk_step_deg)
             self._status(f"Tilting stage to "
                          f"{self._tilt_deg + step_deg:.1f}°...")
+            before_deg = self._tilt_deg
             self._tilt_absolute(self._tilt_deg + step_deg)
+            if (abs(step_deg) >= epsilon_deg
+                    and abs(self._tilt_deg - before_deg) < epsilon_deg / 2):
+                logger.warning(
+                    "Tilt walk stalled at %.3f° (commanded step %+.3f°); "
+                    "handing over to the closed loop", self._tilt_deg,
+                    step_deg)
+                fit = self._measure_required()
+                fit = self._keep_in_view(fit)
+                break
             fit = self._measure_required()
             fit = self._keep_in_view(fit)
+        else:
+            logger.warning(
+                "Tilt walk did not settle within %d steps (at %.3f°, "
+                "model %.3f°); handing over to the closed loop",
+                max_steps, self._tilt_deg, model_tilt_deg)
         # Closed loop on the measured angle (sample planarity correction).
         probe = _SignProbe("Tilt correction", cfg.tilt_sign)
         previous: Optional[float] = None
@@ -563,16 +819,122 @@ class AlignmentSequence:
 
     def _measure_once(self) -> Optional[EllipseFit]:
         """One grab + sanity guard + detect + gates. Publishes every
-        frame (including rejected ones, so the operator sees why)."""
+        frame (including rejected ones, so the operator sees why).
+        Candidates are gated best-score first: a garbage fit from one
+        ring polarity cannot shadow an acceptable fit from the other."""
         frame = self._grab()
         if not self._frame_usable(frame):
             self._on_frame(frame.data, None, frame.pixel_size_m)
+            self._debug_frame(frame, None, "unusable_frame")
             return None
-        fit = self._detect(frame.data)
-        self._on_frame(frame.data, fit, frame.pixel_size_m)
-        if fit is None:
+        fits = self._detect(frame.data, self._expected_geometry())
+        if not fits:
+            self._on_frame(frame.data, None, frame.pixel_size_m)
+            self._debug_frame(frame, None, "no_fit")
             return None
-        return fit if self._fit_acceptable(fit) else None
+        first_reason = None
+        for fit in fits:
+            reason = self._gate_fit(fit)
+            if reason is None:
+                self._on_frame(frame.data, fit, frame.pixel_size_m)
+                self._debug_frame(frame, fit, "accepted")
+                return fit
+            if first_reason is None:
+                first_reason = reason
+        self._on_frame(frame.data, fits[0], frame.pixel_size_m)
+        self._debug_frame(frame, fits[0], f"rejected: {first_reason}")
+        return None
+
+    def _expected_geometry(self) -> Optional[ExpectedGeometry]:
+        """Physical-model priors for the detector. The AOI diameter
+        pins the semi-major axis (tilt-invariant); the acceptance
+        angle window pins the axis-ratio band, excluding degenerate
+        flat hypotheses inside RANSAC so the true ring wins the fit.
+        None when the AOI is unknown (checks-disabled mode)."""
+        aoi_um = self._working_aoi_diameter_um
+        if aoi_um <= 0 or self._last_pixel_size_m <= 0:
+            return None
+        semi_major_px = (aoi_um * 1e-6 / 2.0) / self._last_pixel_size_m
+        low_deg, high_deg = self._angle_window_deg()
+        detector_cfg = self._cfg.detector
+        ratio_low = max(math.sin(math.radians(max(low_deg, 0.5))),
+                        detector_cfg.min_axis_ratio)
+        ratio_high = min(math.sin(math.radians(min(high_deg, 20.0))),
+                         detector_cfg.max_axis_ratio)
+        if ratio_high <= ratio_low:
+            ratio_low = detector_cfg.min_axis_ratio
+            ratio_high = detector_cfg.max_axis_ratio
+        # The ring's image tilt tracks the applied scan rotation 1:1
+        # (verified on the real corpus; tracking sign is instrument-
+        # dependent, so the bound is symmetric): intrinsic ring
+        # rotation headroom plus whatever rotation this run applied.
+        max_abs_tilt_deg = (_INTRINSIC_RING_TILT_HEADROOM_DEG
+                            + abs(self._ops.ion_beam.scan_rotation_deg()))
+        return ExpectedGeometry(semi_major_px=semi_major_px,
+                                axis_ratio=(ratio_low, ratio_high),
+                                max_abs_tilt_deg=max_abs_tilt_deg)
+
+    def _angle_window_deg(self) -> Tuple[float, float]:
+        """Acceptance window for the measured milling angle, shared by
+        the detector prior and the plausibility gate so the two can
+        never disagree. Before FOUND: the wide search window around
+        the raw model (sample planarity unknown). After FOUND: a
+        tighter window around the planarity-anchored model."""
+        model_deg = self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
+        if self._anchor.offset_deg is None:
+            window_deg = self._cfg.plausibility_window_deg
+            return (model_deg - window_deg, model_deg + window_deg)
+        window_deg = self._cfg.plausibility_window_tracking_deg
+        center_deg = model_deg + self._anchor.offset_deg
+        return (center_deg - window_deg, center_deg + window_deg)
+
+    def _debug_frame(self, frame: FibFrame, fit: Optional[EllipseFit],
+                     verdict: str) -> None:
+        """Write the grabbed frame (native dtype PNG) plus a JSON
+        sidecar for offline analysis and simulator replay. Never fatal:
+        the first write failure disables capture for the rest of the
+        run. No retention policy — per-run subfolders keep manual
+        cleanup trivial."""
+        if self._debug_run_dir is None:
+            return
+        try:
+            self._debug_run_dir.mkdir(parents=True, exist_ok=True)
+            stem = f"frame_{self._frames:04d}"
+            cv2.imwrite(str(self._debug_run_dir / f"{stem}.png"),
+                        frame.data)
+            fit_map = None
+            if fit is not None:
+                fit_map = asdict(fit)
+                fit_map["milling_angle_deg"] = fit.milling_angle_deg
+            sidecar = {
+                "schema": 2,
+                "frame_index": self._frames,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "phase": self._phase_label,
+                "stage_tilt_deg": self._tilt_deg,
+                "model_milling_angle_deg": (
+                    self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG),
+                "planarity_offset_deg": self._anchor.offset_deg,
+                "working_aoi_diameter_um": self._working_aoi_diameter_um,
+                "reanchors_used": self._reanchors_used,
+                "target_milling_angle_deg": (
+                    self._params.target_milling_angle_deg),
+                "aoi_diameter_um": self._params.aoi_diameter_um,
+                "hfw_m": frame.hfw_m,
+                "pixel_size_m": frame.pixel_size_m,
+                "scan_rotation_deg": self._ops.ion_beam.scan_rotation_deg(),
+                "frame_shape": list(frame.data.shape),
+                "frame_dtype": str(frame.data.dtype),
+                "verdict": verdict,
+                "fit": fit_map,
+            }
+            (self._debug_run_dir / f"{stem}.json").write_text(
+                json.dumps(sidecar, indent=2))
+            self._debug_frames_written += 1
+        except Exception:
+            logger.exception("Debug frame capture failed; disabling it "
+                             "for the rest of this run")
+            self._debug_run_dir = None
 
     def _frame_usable(self, frame: FibFrame) -> bool:
         """Near-black, saturated, or contrast-less frames never reach
@@ -595,9 +957,8 @@ class AlignmentSequence:
             return False
         return True
 
-    def _measure_required(self) -> EllipseFit:
-        """Measurement with the recovery ladder; losing the ellipse
-        mid-alignment is NOT_FOUND."""
+    def _measure_ladder(self) -> Optional[EllipseFit]:
+        """Plain re-grabs, then one auto-C/B rescue."""
         for _ in range(1 + self._cfg.detection_retries):
             fit = self._measure_once()
             if fit is not None:
@@ -606,42 +967,129 @@ class AlignmentSequence:
                     "and retrying once")
         self._check_stop()
         self._ops.imaging.run_auto_cb()
-        fit = self._measure_once()
+        return self._measure_once()
+
+    def _measure_required(self) -> EllipseFit:
+        """Measurement with the recovery ladder. When the ladder fails
+        post-anchor, a bounded re-anchor attempt clears the lock —
+        which also reverts the detector prior and gates to the wide
+        search window, re-admitting a ring a poisoned anchor excluded —
+        and demands a fresh 2-frame confirmation. Success restarts
+        convergence via _Reacquired; exhaustion is NOT_FOUND."""
+        fit = self._measure_ladder()
         if fit is not None:
             return fit
-        raise _NotFound("Ellipse lost during alignment — check the FIB "
-                        "view, then press Start to retry")
-
-    def _fit_acceptable(self, fit: EllipseFit) -> bool:
         cfg = self._cfg
+        while self._reanchors_used < cfg.reanchor_budget:
+            self._reanchors_used += 1
+            self._warn(
+                f"Detection lost — re-acquiring the ellipse (attempt "
+                f"{self._reanchors_used}/{cfg.reanchor_budget})")
+            previous_offset = self._anchor.offset_deg
+            self._anchor.reset()
+            # Full lock-trust reset: a poisoned lock may carry a
+            # poisoned width.
+            self._working_aoi_diameter_um = self._params.aoi_diameter_um
+            fit = self._acquire_lock_in_place()
+            if fit is not None:
+                was = (f"{previous_offset:+.2f}°"
+                       if previous_offset is not None else "none")
+                self._warn(
+                    f"Re-anchored at {self._anchor.offset_deg:+.2f}° "
+                    f"(was {was})")
+                raise _Reacquired(fit)
+        raise _NotFound("Ellipse lost during alignment — re-acquisition "
+                        "failed; check the FIB view, then press Start "
+                        "to retry")
+
+    def _acquire_lock_in_place(self) -> Optional[EllipseFit]:
+        """Bounded same-tilt re-acquisition: two grabs, one auto-C/B,
+        two more grabs, each accepted fit feeding the (cleared) anchor
+        until a 2-frame confirmation lands."""
+        for attempt in range(4):
+            if attempt == 2:
+                self._check_stop()
+                self._ops.imaging.run_auto_cb()
+            fit = self._measure_once()
+            if fit is not None and self._observe_for_anchor(fit):
+                return fit
+        return None
+
+    def _gate_fit(self, fit: EllipseFit) -> Optional[str]:
+        """None when the fit passes every gate, else the rejection
+        reason (logged here, and recorded in the debug sidecar)."""
+        cfg = self._cfg
+        # rms scales with the detector's width-rescaled inlier
+        # tolerance, so the ceiling must follow the frame width too.
+        width_px = (self._last_frame_shape[1]
+                    or cfg.detector.reference_width_px)
+        max_rms_px = (cfg.fit_max_rms_px
+                      * width_px / cfg.detector.reference_width_px)
         if (fit.n_inliers < cfg.fit_min_inliers
                 or fit.coverage < cfg.fit_min_coverage
-                or fit.rms_px > cfg.fit_max_rms_px):
+                or fit.rms_px > max_rms_px):
+            reason = (f"quality inliers={fit.n_inliers} "
+                      f"coverage={fit.coverage:.2f} rms={fit.rms_px:.2f}")
             logger.info("Fit rejected by quality gates: inliers=%d "
                         "coverage=%.2f rms=%.2f", fit.n_inliers,
                         fit.coverage, fit.rms_px)
-            return False
-        model_angle_deg = self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
-        if abs(fit.milling_angle_deg
-               - model_angle_deg) > cfg.plausibility_window_deg:
+            return reason
+        low_deg, high_deg = self._angle_window_deg()
+        if not low_deg <= fit.milling_angle_deg <= high_deg:
             logger.info(
-                "Fit rejected as implausible: measured %.2f deg vs model "
-                "%.2f deg at stage tilt %.2f deg", fit.milling_angle_deg,
-                model_angle_deg, self._tilt_deg)
-            return False
-        aoi_um = self._params.aoi_diameter_um
-        if aoi_um > 0 and self._last_pixel_size_m > 0:
-            # The major axis is the true AOI diameter — foreshortening
-            # only shrinks the minor axis — so measured width vs the
-            # user's diameter is an independent false-detection gate.
+                "Fit rejected as implausible: measured %.2f deg vs "
+                "window [%.2f, %.2f] deg at stage tilt %.2f deg",
+                fit.milling_angle_deg, low_deg, high_deg, self._tilt_deg)
+            return (f"implausible measured={fit.milling_angle_deg:.2f} "
+                    f"window=[{low_deg:.2f}, {high_deg:.2f}]")
+        if self._anchor.offset_deg is None:
+            # Anchor-candidate plausibility cap, STRICTER than the
+            # search window and applied in the gate so the best-first
+            # candidate iteration falls through a persistent decoy to
+            # the true ring (run 1's -2.97 deg clutter passed the
+            # window and would have anchored again).
+            model_deg = self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
+            offset_deg = fit.milling_angle_deg - model_deg
+            if abs(offset_deg) > cfg.anchor_max_offset_deg:
+                logger.info(
+                    "Fit rejected as an anchor candidate: implied "
+                    "planarity offset %+.2f deg exceeds the %.1f deg "
+                    "cap", offset_deg, cfg.anchor_max_offset_deg)
+                return (f"anchor_offset {offset_deg:+.2f} deg exceeds "
+                        f"±{cfg.anchor_max_offset_deg:.1f}")
+        if self._last_pixel_size_m > 0:
             width_um = (2.0 * fit.semi_major_px
                         * self._last_pixel_size_m * 1e6)
-            if abs(width_um - aoi_um) > cfg.aoi_width_tolerance_frac * aoi_um:
-                logger.info(
-                    "Fit rejected by the AOI width gate: measured width "
-                    "%.0f um vs expected %.0f um", width_um, aoi_um)
-                return False
-        return True
+            entered_um = self._params.aoi_diameter_um
+            if self._anchor.offset_deg is None:
+                # The major axis is the true AOI diameter, so measured
+                # width vs the user's entry is an independent
+                # false-detection gate at lock time.
+                if entered_um > 0 and abs(width_um - entered_um) \
+                        > cfg.aoi_width_tolerance_frac * entered_um:
+                    logger.info(
+                        "Fit rejected by the AOI width gate: measured "
+                        "width %.0f um vs expected %.0f um", width_um,
+                        entered_um)
+                    return (f"aoi_width {width_um:.0f} um vs "
+                            f"expected {entered_um:.0f} um")
+            elif self._working_aoi_diameter_um > 0:
+                # Post-anchor the run tracks the measured (working)
+                # width; the band derives from the detector's own
+                # semi-major prior tolerance so the gate and the prior
+                # can never disagree.
+                working_um = self._working_aoi_diameter_um
+                tolerance_frac = \
+                    cfg.detector.expected_semi_major_tolerance_frac
+                if abs(width_um - working_um) \
+                        > tolerance_frac * working_um:
+                    logger.info(
+                        "Fit rejected by the AOI width gate: measured "
+                        "width %.0f um vs working %.0f um", width_um,
+                        working_um)
+                    return (f"aoi_width {width_um:.0f} um vs "
+                            f"working {working_um:.0f} um")
+        return None
 
     def _offset_m(self, fit: EllipseFit) -> Tuple[float, float]:
         """Ellipse-center offset from the frame center, image coords."""
@@ -726,13 +1174,21 @@ class AlignmentSequence:
         logger.info("%s", text)
         self._on_status(text)
 
+    def _warn(self, text: str) -> None:
+        """Operator advisory: live status line now, and collected onto
+        the AlignmentResult for the end-of-run surface."""
+        logger.warning("%s", text)
+        self._on_status(f"Warning: {text}")
+        self._warnings.append(text)
+
     def _result(self, outcome: AlignmentOutcome, message: str,
                 fit: Optional[EllipseFit] = None) -> AlignmentResult:
         self._status(message)
         return AlignmentResult(
             outcome=outcome, message=message, final_fit=fit,
             frames_grabbed=self._frames, tilt_moves=self._tilt_moves,
-            center_moves=self._center_moves)
+            center_moves=self._center_moves,
+            warnings=tuple(self._warnings))
 
 
 def _clamp(value: float, magnitude: float) -> float:

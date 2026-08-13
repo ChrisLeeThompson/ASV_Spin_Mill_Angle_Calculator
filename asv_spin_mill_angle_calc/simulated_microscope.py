@@ -91,6 +91,12 @@ class SimulatedMicroscopeState:
     # Behavior knobs
     move_delay_s: float = 0.0       # per-move settle (app: small, tests: 0)
     connect_delay_s: float = 0.0
+    # Read-back granularity: current_position() reports t_deg plus this
+    # offset while the physics (rendering, StateDetect) uses the true
+    # t_deg — models a real stage whose encoder never reads back the
+    # commanded tilt exactly (the alignment sequence must tolerate up
+    # to its tilt_readback_tolerance_deg of such deviation).
+    tilt_readback_offset_deg: float = 0.0
     # Internals
     frame_counter: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock,
@@ -117,8 +123,9 @@ class SimulatedStageOps:
     def current_position(self) -> StageSnapshot:
         st = self._state
         with st.lock:
-            return StageSnapshot(x_m=st.x_m, y_m=st.y_m, z_m=st.z_m,
-                                 r_deg=st.r_deg, t_deg=st.t_deg)
+            return StageSnapshot(
+                x_m=st.x_m, y_m=st.y_m, z_m=st.z_m, r_deg=st.r_deg,
+                t_deg=st.t_deg + st.tilt_readback_offset_deg)
 
     def absolute_move(self, *, x_m=None, y_m=None, z_m=None,
                       r_deg=None, t_deg=None) -> None:
@@ -182,7 +189,11 @@ class SimulatedFibImagingOps:
             if self._replay_paths:
                 path = self._replay_paths[
                     (st.frame_counter - 1) % len(self._replay_paths)]
-                data = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+                # UNCHANGED keeps 16-bit depth (debug captures are
+                # native-dtype PNGs); collapse color scans to gray.
+                data = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                if data.ndim == 3:
+                    data = cv2.cvtColor(data, cv2.COLOR_BGR2GRAY)
                 return FibFrame(data=data,
                                 pixel_size_m=st.hfw_m / data.shape[1],
                                 hfw_m=st.hfw_m)

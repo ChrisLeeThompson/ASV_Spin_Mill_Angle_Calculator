@@ -35,6 +35,10 @@ Item {
     // color; the page maps the same state onto the Card border.
     property string viewerState: "idle"
     property string idleText: "No FIB image."
+    // Advisories from the last finished run (width mismatch, mid-run
+    // re-anchor). Shown as an amber chip on success; full texts live
+    // in the Status Log card, the chip's tooltip repeats them.
+    property var warnings: []
 
     readonly property bool hasFit: !!ellipseFit
                                    && ellipseFit.valid === true
@@ -219,6 +223,41 @@ Item {
                         font.pixelSize: AppConfig.fibViewerFooterFontSize
 
                     }
+
+                }
+
+                Rectangle {
+
+                    visible: root.warnings.length > 0
+                    width: advisoryReadout.implicitWidth + 12
+                    height: advisoryReadout.implicitHeight + 4
+                    radius: AppConfig.buttonRadius
+                    color: AppConfig.universalBackground
+                    border.color: AppConfig.activityExceptionColor
+                    border.width: 1
+
+                    Label {
+
+                        id: advisoryReadout
+                        anchors.centerIn: parent
+                        text: "⚠ " + root.warnings.length
+                              + (root.warnings.length > 1
+                                 ? " advisories" : " advisory")
+                        color: AppConfig.activityExceptionColor
+                        font.pixelSize: AppConfig.fibViewerFooterFontSize
+
+                    }
+
+                    MouseArea {
+
+                        id: advisoryHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                    }
+
+                    ToolTip.visible: advisoryHover.containsMouse
+                    ToolTip.text: root.warnings.join("\n")
 
                 }
 

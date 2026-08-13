@@ -36,7 +36,7 @@ QtObject {
 
         // SEM angle calc page
     readonly property string loadSpinMillPositionImagesButtonTooltip: "Load logged spin mill position images from: ''<Project Directory>\\ImageLogs\\<site_name>\\Sample Preparation\\Define Spin Mill Position''\\" +
-                                                                      "AutoSliceAndView.Services.Services.Positioning.SpinMillPositioningService''.\nTo enable spin mill position image logging, go to the Logging page in ASV Settings and" +
+                                                                      "AutoSliceAndView.Services.Services.Positioning.SpinMillPositioningService\\''.\nTo enable spin mill position image logging, go to the Logging page in ASV Settings and" +
                                                                       " check ''Log Spin Mill Position Images''."
 
         // Empty state for the Results card, shown until a load populates it

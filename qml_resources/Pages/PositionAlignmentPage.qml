@@ -344,6 +344,7 @@ Item {
                     frameSeq: appController.positionAlignment.frameSeq
                     ellipseFit: appController.positionAlignment.ellipseFit
                     viewerState: appController.positionAlignment.viewerState
+                    warnings: appController.positionAlignment.lastRunWarnings
 
                 }
 
