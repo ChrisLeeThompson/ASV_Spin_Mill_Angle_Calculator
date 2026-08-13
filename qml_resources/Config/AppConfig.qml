@@ -95,9 +95,10 @@ QtObject {
     readonly property real fibViewerEllipseLineWidth: 2.0
     readonly property int fibViewerCenterMarkerSize: 12   // "+" half-length
     readonly property real fibViewerCenterMarkerLineWidth: 1.5
-    // Frame-center reference cross: subtle gray so the accent-colored
-    // detection marker converging onto it stays the visual story.
-    readonly property color fibViewerCrosshairColor: "#668498a4"
+    // Frame-center reference cross (the centering target): full-opacity
+    // accent so both legs read over the FIB image's bright horizontal
+    // banding (the old 40%-alpha gray horizontal leg vanished into it).
+    readonly property color fibViewerCrosshairColor: universalAccent
     readonly property real fibViewerCrosshairLineWidth: 1.0
     readonly property int fibViewerFooterFontSize: 14
 

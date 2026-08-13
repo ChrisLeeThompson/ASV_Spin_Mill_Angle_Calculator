@@ -5,7 +5,7 @@ import "."
 QtObject {
 
     // Main window
-    readonly property string mainWindowTitle: "ASV Spin Mill Angle Calculator 3.0.0"
+    readonly property string mainWindowTitle: "ASV Spin Mill Angle Calculator 3.1.0"
 
     // Generic confirm-dialog button defaults (overridable per instance)
     readonly property string dialogDefaultAcceptText: "Ok"

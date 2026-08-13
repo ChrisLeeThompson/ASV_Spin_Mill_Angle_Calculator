@@ -117,9 +117,15 @@ Item {
                     ctx.rect(offX, offY, paintedW, paintedH)
                     ctx.clip()
 
-                    // Frame-center reference cross (the centering target).
-                    var centerX = offX + paintedW / 2
-                    var centerY = offY + paintedH / 2
+                    // Frame-center reference cross (the centering
+                    // target), snapped to the half-pixel grid: Canvas
+                    // strokes center on the coordinate, so an integer
+                    // coordinate blurs a 1 px line across two rows at
+                    // half strength. floor (not round) keeps the snap a
+                    // no-op when the true center is already on the
+                    // half-pixel grid (odd viewport sizes).
+                    var centerX = Math.floor(offX + paintedW / 2) + 0.5
+                    var centerY = Math.floor(offY + paintedH / 2) + 0.5
                     DiagramFunctions.drawLine(
                         ctx, offX, centerY, offX + paintedW, centerY,
                         AppConfig.fibViewerCrosshairColor,

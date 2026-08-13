@@ -126,6 +126,12 @@ class AlignmentConfig:
     # Converge+verify rounds (verification failure re-enters converge
     # once before reporting NOT_CONVERGED)
     verify_rounds: int = 2
+    # Frames per verification round: centering and leveling are checked
+    # on every frame, the angle verdict is the round's MEDIAN angle.
+    # Must be ODD (validated): an even count would let the upper-middle
+    # frame decide the verdict alone — exactly the single-noisy-fit
+    # failure the median exists to prevent.
+    verify_frames: int = 3
     # Direction signs — the loops probe and self-correct once, but the
     # confirmed instrument conventions belong here after shakedown.
     # The simulator implements the all-(+1) convention, so
@@ -187,6 +193,11 @@ class AlignmentConfig:
                 "could pass the 1:1 angle-tracking consistency check")
         if self.reanchor_budget < 0:
             raise ValueError("reanchor_budget cannot be negative")
+        if self.verify_frames < 1 or self.verify_frames % 2 == 0:
+            raise ValueError(
+                f"verify_frames {self.verify_frames} must be a positive "
+                "ODD count — with an even count the 'median' is the "
+                "upper-middle frame, so one noisy fit decides the round")
         if not 0 <= self.level_noise_floor_deg <= self.level_tolerance_deg:
             raise ValueError(
                 "level_noise_floor_deg must sit within the leveling "

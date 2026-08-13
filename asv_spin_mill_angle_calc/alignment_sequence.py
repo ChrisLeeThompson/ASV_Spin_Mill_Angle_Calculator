@@ -9,7 +9,10 @@ Flow (see .claude/position_alignment_design.md for the requirements):
 1.  CHECKS   — target angle window, beam on (refuse) / blanked (auto
     unblank), tilt limits, Specimen coordinate system.
 2.  SETUP    — FIB into the active view; snapshot the operator's scan
-    conditions (the run images with whatever ASV set up).
+    conditions (the run images with whatever ASV set up). Beam-shift
+    runs start from a zeroed beam shift: the trim adds to the current
+    value, so a shift inherited from a previous run would bias the
+    alignment and accumulate toward the clamp limits.
 3.  SEARCH   — detect at the current tilt (ASV already tilted to the
     milling angle); if not found, walk tilt toward 0 in small steps
     (a fatter ellipse is easier to detect; never more negative),
@@ -31,8 +34,10 @@ Flow (see .claude/position_alignment_design.md for the requirements):
     giving up.
 5.  RESTORE  — walk HFW back if the search escalated it. Scan rotation
     is deliberately NOT restored: it is the product ASV logs.
-6.  VERIFY   — two consecutive fresh frames with angle, centering and
-    level all inside tolerance; a failure re-enters CONVERGE once.
+6.  VERIFY   — verify_frames fresh frames (default 3): centering and
+    level inside tolerance on EVERY frame, the angle verdict on the
+    round's MEDIAN angle (a single noisy minor-axis fit cannot decide
+    the round); a failure re-enters CONVERGE once.
 
 Safety posture: ``run()`` never raises; every hardware call is preceded
 by a cooperative stop check (SDK calls block and cannot be interrupted —
@@ -409,6 +414,8 @@ class AlignmentSequence:
     def _setup(self) -> None:
         self._phase("View setup", "Selecting the ion beam view...")
         self._ops.imaging.prepare_fib_view(self._cfg.fib_view)
+        if self._params.use_beam_shift:
+            self._zero_beam_shift()
         conditions = self._ops.ion_beam.scan_conditions()
         self._initial_hfw_m = conditions.hfw_m
         self._expected_hfw_m = conditions.hfw_m
@@ -747,13 +754,7 @@ class AlignmentSequence:
         (x_lo, x_hi), (y_lo, y_hi) = self._beam_limits_m()
         clamped_x_m = min(max(desired_x_m, x_lo), x_hi)
         clamped_y_m = min(max(desired_y_m, y_lo), y_hi)
-        self._check_stop()
-        self._ops.ion_beam.set_beam_shift_m(clamped_x_m, clamped_y_m)
-        readback_x_m, readback_y_m = self._ops.ion_beam.beam_shift_m()
-        if (abs(readback_x_m - clamped_x_m) > 1e-9
-                or abs(readback_y_m - clamped_y_m) > 1e-9):
-            raise RuntimeError("Beam shift write had no effect "
-                               "(read-back mismatch)")
+        self._write_beam_shift(clamped_x_m, clamped_y_m)
         spill_x_m = desired_x_m - clamped_x_m
         spill_y_m = desired_y_m - clamped_y_m
         if abs(spill_x_m) > 1e-9 or abs(spill_y_m) > 1e-9:
@@ -775,6 +776,29 @@ class AlignmentSequence:
                            "+/-%.1f um", fallback_m * 1e6)
             return ((-fallback_m, fallback_m), (-fallback_m, fallback_m))
 
+    def _zero_beam_shift(self) -> None:
+        """Beam-shift runs start from a neutral beam: the trim adds to
+        the CURRENT value, so a shift inherited from a previous run
+        both biases the alignment and walks the accumulated value into
+        the clamp limits (2026-08-13 corpus: run 074934's trim
+        persisted into every following run)."""
+        current_x_m, current_y_m = self._ops.ion_beam.beam_shift_m()
+        if abs(current_x_m) <= 1e-9 and abs(current_y_m) <= 1e-9:
+            return
+        self._status("Zeroing ion beam shift...")
+        logger.info("Zeroing ion beam shift (was (%+.2f, %+.2f) um)",
+                    current_x_m * 1e6, current_y_m * 1e6)
+        self._write_beam_shift(0.0, 0.0)
+
+    def _write_beam_shift(self, x_m: float, y_m: float) -> None:
+        self._check_stop()
+        self._ops.ion_beam.set_beam_shift_m(x_m, y_m)
+        readback_x_m, readback_y_m = self._ops.ion_beam.beam_shift_m()
+        if (abs(readback_x_m - x_m) > 1e-9
+                or abs(readback_y_m - y_m) > 1e-9):
+            raise RuntimeError("Beam shift write had no effect "
+                               "(read-back mismatch)")
+
     # --- Verify ----------------------------------------------------------
 
     def _verify(self, target_deg: float):
@@ -783,22 +807,36 @@ class AlignmentSequence:
         tolerance_m = (self._beam_tolerance_m()
                        if self._params.use_beam_shift
                        else self._stage_tolerance_m())
-        fit = None
-        for attempt in range(2):  # two consecutive confirming frames
+        fits = []
+        for _ in range(cfg.verify_frames):
             fit = self._measure_required()
-            angle_error_deg = abs(target_deg - fit.milling_angle_deg)
             offset_m = math.hypot(*self._offset_m(fit))
-            level_deg = abs(fit.tilt_deg)
-            if angle_error_deg > cfg.tilt_tolerance_deg:
-                return (False, fit,
-                        f"angle off by {angle_error_deg:.2f}°")
             if offset_m > tolerance_m:
                 return (False, fit,
                         f"off-center by {offset_m * 1e6:.1f} µm")
+            level_deg = abs(fit.tilt_deg)
             if level_deg > cfg.level_tolerance_deg:
                 return (False, fit,
                         f"ellipse tilted {level_deg:.2f}°")
-        return (True, fit, "")
+            fits.append(fit)
+        # Centering and leveling are STATE — any single frame violating
+        # them fails the round above. The angle verdict pools the
+        # round: the per-frame noise lives in the measured minor axis
+        # (2026-08-13 corpus), so the MEDIAN outvotes one noisy fit in
+        # either direction, and the reported fit is the median frame
+        # itself — an actual measurement, not a synthetic average.
+        fits.sort(key=lambda item: item.milling_angle_deg)
+        median_fit = fits[len(fits) // 2]
+        spread_deg = (fits[-1].milling_angle_deg
+                      - fits[0].milling_angle_deg)
+        self._status(
+            f"Verification: median {median_fit.milling_angle_deg:.2f}° "
+            f"over {len(fits)} frames (spread {spread_deg:.2f}°)")
+        angle_error_deg = abs(target_deg - median_fit.milling_angle_deg)
+        if angle_error_deg > cfg.tilt_tolerance_deg:
+            return (False, median_fit,
+                    f"angle off by {angle_error_deg:.2f}°")
+        return (True, median_fit, "")
 
     # --- Measurement helpers ----------------------------------------------
 
