@@ -5,7 +5,7 @@ import "../Config"
 
 // Modal confirmation dialog.
 //
-// A word-wrapped message with Ok/Cancel buttons (texts from the Strings
+// A word-wrapped message with OK/Cancel buttons (texts from the Strings
 // defaults, overridable per instance), an optional "do not show this
 // again" checkbox, and an informational mode (showRejectButton: false)
 // for notices like the tilt-limit dialog. Centered on the window
@@ -38,8 +38,8 @@ Dialog {
             id: messageLabel
             Layout.fillWidth: true
             // Zeroed preferred width: a wrapping Label's implicitWidth
-            // is its full unwrapped text width (the page-layout lesson);
-            // the dialog's width must win.
+            // is its full unwrapped text width; the dialog's width must
+            // win.
             Layout.preferredWidth: 0
             wrapMode: Label.WordWrap
             font.pixelSize: AppConfig.pageBodyFontSize

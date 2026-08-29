@@ -4,17 +4,12 @@ import "../Config"
 
 // Scrollable plain-text log.
 //
-// Dumb, property-driven: the caller binds `text` and the view renders it
-// without wrapping, scrolling on both axes (the tables' two-axis idiom:
-// AsNeeded scrollbars with RESERVED gutters — content sizes include the
-// bars' thickness so they never overlay the text, and margins keep the
-// two bars out of each other's corner). The view keeps the END of the
-// text in view: appended scrollback lands on the newest line, and a
-// replaced block lands on its tail — where the important part is (the
-// SEM Results card's warnings close the audit block).
-//
-// The Flickable's implicit size stays 0 (text length must not leak into
-// the page grid's row/column sizing — the host card dictates the size).
+// Dumb, property-driven: the caller binds `text`; the view renders it
+// without wrapping, scrolls on both axes with reserved scrollbar gutters
+// (the tables' idiom), and keeps the end of the text in view — the newest
+// or final lines carry the important part. The Flickable's implicit size
+// stays 0 so text length never leaks into the page grid's sizing — the
+// host card dictates the size.
 
 Item {
 

@@ -2,3 +2,4 @@ module Pages
 PositionAlignmentPage 1.0 PositionAlignmentPage.qml
 FIBAngleCalcPage 1.0 FIBAngleCalcPage.qml
 SEMAngleCalcPage 1.0 SEMAngleCalcPage.qml
+SettingsPage 1.0 SettingsPage.qml

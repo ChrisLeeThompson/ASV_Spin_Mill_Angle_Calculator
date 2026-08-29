@@ -46,13 +46,13 @@ ApplicationWindow {
                     ListElement { name: "SEM Angle Calc" }
                 }
 
-                // No secondary (e.g. Settings) pages yet. To add one later:
-                //   1. give the SideBar a secondaryModel, e.g.
-                //        secondaryModel: ListModel { ListElement { name: "Settings" } }
-                //   2. add a matching page as the next child of the StackLayout
-                //      below (child order must mirror the models).
-                // The SideBar already offsets secondary indices past the
-                // primary ones, so the StackLayout indices line up.
+                // Bottom-pinned secondary group. The SideBar offsets
+                // secondary indices past the primary ones, so the
+                // StackLayout children below must mirror the combined
+                // model order (primary first, then secondary).
+                secondaryModel: ListModel {
+                    ListElement { name: "Settings" }
+                }
 
             }
 
@@ -95,6 +95,8 @@ ApplicationWindow {
 
                     SEMAngleCalcPage { id: semAngleCalcPage }
 
+                    SettingsPage { id: settingsPage }
+
                 }
 
             }
@@ -109,7 +111,7 @@ ApplicationWindow {
             statusIndicator: appController.microscope.connectionStatus
 
             // Message slot driven by controller statusUpdated signals via
-            // the Connections blocks below (Hydra pattern).
+            // the Connections blocks below.
             // Center progress: an indeterminate pulse while the Position
             // Alignment automation runs (a convergence loop has no
             // meaningful fraction).

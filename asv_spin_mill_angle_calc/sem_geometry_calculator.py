@@ -1,5 +1,4 @@
-"""
-Module handles SEM geometry calculations for sample alignment.
+"""SEM geometry calculations for sample alignment.
 
 The calculator analyses a set of FIB spin mill position images — each
 captured at a different stage rotation, with the stage tilt adjusted by
@@ -7,7 +6,7 @@ the user to hold the milled fiducial ellipse height constant — and
 computes the stage rotation and stage tilt required to bring the sample
 surface normal parallel to the SEM beam (+Z).
 
-The approach
+The Approach
 ------------
 At every (stage rotation, stage tilt) the FIB sees the sample with a
 constant milling angle (the user's target milling angle, alpha). Because
@@ -25,12 +24,8 @@ candidate zero crossing evaluates theta_final = theta_star + (38 - alpha).
 The primary candidate is the one with the smaller |theta_final|; the
 alternate is logged for diagnostic purposes.
 
-Ported from ASV_SpinMill_AngleCalculator_2.3 (validated against an exact
-forward model and the 2026-07-07 real-image dataset — do not re-derive).
-3.0 additions: ``SEMGeometryInputs.from_records`` (replacing the parser-
-dict coupling), two data-quality warnings (rotation span, cross-fit
-consistency — warnings only; statuses are unchanged from 2.3), and the
-measured perpendicular-candidate section at the bottom.
+The math is validated against an exact forward model and a real-image
+dataset — do not re-derive it.
 
 Sign conventions and units match the rest of the application: angles
 enter and leave in radians (rounded to 0.0001 rad internally), with
@@ -49,6 +44,7 @@ import numpy as np
 from asv_spin_mill_angle_calc.image_metadata import SpinMillImageMetadata
 from asv_spin_mill_angle_calc.spin_mill_geometry import (
     FIB_ANGLE_FROM_STAGE_PLANE_DEG,
+    fold_scan_rotation_rad,
 )
 
 # -----------------------------------------------------------------
@@ -79,7 +75,7 @@ MARGINAL_FIT_THRESHOLD: int = 5
 MIN_R_SQUARED: float = 0.95
 MIN_FIT_AMPLITUDE_RAD: float = math.radians(0.5)
 
-# --- Data-quality warning thresholds (new in 3.0; warnings only) -----
+# --- Data-Quality Warning Thresholds (warnings only) -----------------
 # Below this circular span of input stage rotations the sinusoid phase
 # is poorly constrained even at high R-squared (validated failure mode:
 # a 60 deg span gave p95 residual 1.31 deg while R-squared stayed OK).
@@ -91,6 +87,22 @@ MIN_ROTATION_SPAN_DEG: float = 150.0
 # used to level the ellipse at each position.
 FIT_AMPLITUDE_RATIO_MAX: float = 2.0
 QUADRATURE_TOLERANCE_DEG: float = 20.0
+
+
+def scan_rotation_branch_center_rad(values_rad: Sequence[float]) -> float:
+    """The pi-periodic circular mean of a set of scan rotations.
+
+    Computed on doubled angles — ``0.5 * atan2(sum sin 2v, sum cos 2v)``
+    — because ellipse orientation is pi-periodic (see
+    ``spin_mill_geometry.fold_scan_rotation_rad``), then folded into
+    (-pi/2, pi/2]. Returns 0.0 when the resultant vector is degenerate
+    (values 90 deg apart cancel exactly).
+    """
+    s = sum(math.sin(2.0 * v) for v in values_rad)
+    c = sum(math.cos(2.0 * v) for v in values_rad)
+    if math.hypot(s, c) < 1e-12:
+        return 0.0
+    return fold_scan_rotation_rad(0.5 * math.atan2(s, c))
 
 
 # -----------------------------------------------------------------
@@ -111,8 +123,7 @@ class SEMGeometryStatus(Enum):
 
 @dataclass(frozen=True)
 class SEMGeometryInputs:
-    """
-    Immutable input bundle for the SEM geometry calculation.
+    """Immutable input bundle for the SEM geometry calculation.
 
     Attributes:
         stage_rotations_rad: Stage rotation angles, in radians, one per
@@ -142,15 +153,43 @@ class SEMGeometryInputs:
     def num_points(self) -> int:
         return len(self.stage_rotations_rad)
 
+    @property
+    def scan_rotation_branch_center_rad(self) -> float:
+        """The pi-periodic circular mean of the scan rotations, in
+        (-pi/2, pi/2] — the anchor for :attr:`folded_scan_rotations_rad`
+        and the "your baseline is off the 0/180 reference" diagnostic."""
+        return scan_rotation_branch_center_rad(self.scan_rotations_rad)
+
+    @property
+    def folded_scan_rotations_rad(self) -> Tuple[float, ...]:
+        """Scan rotations folded into the pi-wide branch nearest their
+        circular mean.
+
+        Ellipse orientation is pi-periodic, so a scan rotation of 180 deg
+        is physically the same orientation as 0 deg; instruments whose
+        session baseline is 180 deg would otherwise hand the sinusoid fit
+        an offset ~300x its amplitude and never find a zero crossing.
+        Anchoring on the circular mean (rather than folding each value
+        about 0) keeps a cluster continuous: values straddling +/-90 deg
+        would otherwise fold to opposite ends of the branch and wreck the
+        fit. For a non-straddling cluster every value differs from its
+        raw counterpart by the same multiple of pi, so the fit's
+        amplitude, phase and R-squared are unchanged — only the offset C
+        moves. ``scan_rotations_rad`` itself stays raw: it is the
+        reproducibility record the formatter logs.
+        """
+        center = self.scan_rotation_branch_center_rad
+        return tuple(center + fold_scan_rotation_rad(v - center)
+                     for v in self.scan_rotations_rad)
+
     @classmethod
     def from_records(cls, records: Sequence[SpinMillImageMetadata],
                      target_milling_angle_deg: float) -> "SEMGeometryInputs":
-        """
-        Build inputs from parsed image records.
+        """Build inputs from parsed image records.
 
         Every record carries all required fields by construction (the
         parser raises per-file instead of yielding partial rows), so
-        unlike 2.3's dict path there is no silent row-skipping here.
+        there is no silent row-skipping here.
         """
         return cls(
             stage_rotations_rad=tuple(r.stage_rotation_rad for r in records),
@@ -166,8 +205,7 @@ class SEMGeometryInputs:
 
 @dataclass(frozen=True)
 class SinusoidFit:
-    """
-    Result of a linear sinusoid fit ``y = A * sin(x - phi0) + C``.
+    """Result of a linear sinusoid fit ``y = A * sin(x - phi0) + C``.
 
     Attributes:
         amplitude_rad: Fitted amplitude ``A`` (always non-negative).
@@ -192,8 +230,7 @@ class SinusoidFit:
 
 @dataclass(frozen=True)
 class SEMGeometryResult:
-    """
-    Immutable result bundle from a single SEM geometry calculation.
+    """Immutable result bundle from a single SEM geometry calculation.
 
     The result is self-contained: it carries the inputs, the fit
     diagnostics, both candidate solutions, the selected primary, and
@@ -260,8 +297,7 @@ class SEMGeometryResult:
 # -----------------------------------------------------------------
 
 class SEMGeometryCalculator:
-    """
-    Pure-Python SEM geometry calculator.
+    """Pure-Python SEM geometry calculator.
 
     The class is stateless: a single public method ``calculate``
     consumes an ``SEMGeometryInputs`` and returns an
@@ -275,8 +311,7 @@ class SEMGeometryCalculator:
     # -----------------------------------------------------------------
 
     def calculate(self, inputs: SEMGeometryInputs) -> SEMGeometryResult:
-        """
-        Run the full geometry calculation on a single input bundle.
+        """Run the full geometry calculation on a single input bundle.
 
         Args:
             inputs: The input bundle from ``SEMGeometryInputs``.
@@ -302,21 +337,25 @@ class SEMGeometryCalculator:
                 f"positions."
             )
 
-        # Rotation-span check (3.0): a narrow span leaves the sinusoid
+        # Rotation-span check: a narrow span leaves the sinusoid
         # phase poorly constrained even when R-squared looks fine.
         span_rad = self._rotation_span_rad(inputs.stage_rotations_rad)
         if span_rad < math.radians(MIN_ROTATION_SPAN_DEG):
             warnings.append(
-                f"Stage rotations span only {math.degrees(span_rad):.0f} "
-                f"deg; the result may be poorly constrained (recommend "
-                f"covering at least {MIN_ROTATION_SPAN_DEG:.0f} deg)."
+                f"Stage rotations span only {math.degrees(span_rad):.0f}°; "
+                f"the result may be poorly constrained (recommend "
+                f"covering at least {MIN_ROTATION_SPAN_DEG:.0f}°)."
             )
 
-        # Step 1: fit both relationships.
+        # Step 1: fit both relationships. The scan sinusoid is fitted on
+        # the folded rotations (pi-periodic orientation, see
+        # folded_scan_rotations_rad): for a coherent cluster the fold is
+        # a constant offset, so A/phi/R-squared are unchanged and only C
+        # moves into the branch where a zero crossing exists.
         try:
             scan_fit = self._fit_sinusoid(
                 np.asarray(inputs.stage_rotations_rad, dtype=float),
-                np.asarray(inputs.scan_rotations_rad, dtype=float),
+                np.asarray(inputs.folded_scan_rotations_rad, dtype=float),
             )
             tilt_fit = self._fit_sinusoid(
                 np.asarray(inputs.stage_rotations_rad, dtype=float),
@@ -325,7 +364,7 @@ class SEMGeometryCalculator:
         except Exception as exc:  # pragma: no cover - defensive
             return self._fit_failed_result(inputs, warnings, exc)
 
-        # Cross-fit consistency check (3.0): both fits independently
+        # Cross-fit consistency check: both fits independently
         # measure the same sample tilt, so their amplitudes and phase
         # quadrature are a free lie detector for the input data.
         warnings.extend(
@@ -446,12 +485,19 @@ class SEMGeometryCalculator:
                             warnings: list,
                             scan_fit: SinusoidFit,
                             tilt_fit: SinusoidFit) -> SEMGeometryResult:
+        message = ("Scan rotation does not cross zero. Sample may be too "
+                   "flat to align, or fit offset exceeds amplitude.")
+        # A branch center materially off 0 usually means the instrument's
+        # baseline sits off the 0/180 reference (the fold handles 180
+        # exactly; e.g. a 90 deg baseline is a genuinely different
+        # orientation and cannot alias to 0).
+        center_deg = math.degrees(inputs.scan_rotation_branch_center_rad)
+        if abs(center_deg) > 1.0:
+            message += (f" (scan rotations sit ~{center_deg:.1f}° off "
+                        f"the 0/180 reference)")
         return SEMGeometryResult(
             status=SEMGeometryStatus.AMBIGUOUS,
-            status_message=(
-                "Scan rotation does not cross zero. Sample may be too "
-                "flat to align, or fit offset exceeds amplitude."
-            ),
+            status_message=message,
             warnings=tuple(warnings),
             target_stage_rotation_rad=None,
             target_stage_tilt_rad=None,
@@ -470,17 +516,17 @@ class SEMGeometryCalculator:
     def _collect_ambiguous_reasons(n: int,
                                    scan_fit: SinusoidFit,
                                    tilt_fit: SinusoidFit) -> list:
-        """
-        Collect reasons (as plain strings) why the fit should be
-        considered ambiguous. An empty list means the fit is OK.
+        """Collect reasons why the fit should be considered ambiguous.
+
+        Returns plain strings; an empty list means the fit is OK.
         """
         reasons: list = []
         if scan_fit.amplitude_rad < MIN_FIT_AMPLITUDE_RAD:
             reasons.append(
                 f"Scan rotation amplitude "
-                f"({math.degrees(scan_fit.amplitude_rad):.3f} deg) is "
+                f"({math.degrees(scan_fit.amplitude_rad):.3f}°) is "
                 f"below the minimum threshold "
-                f"({math.degrees(MIN_FIT_AMPLITUDE_RAD):.3f} deg). "
+                f"({math.degrees(MIN_FIT_AMPLITUDE_RAD):.3f}°). "
                 f"Sample may be too flat to align reliably."
             )
         if n >= MARGINAL_FIT_THRESHOLD and scan_fit.r_squared < MIN_R_SQUARED:
@@ -499,8 +545,7 @@ class SEMGeometryCalculator:
     @staticmethod
     def _collect_consistency_warnings(scan_fit: SinusoidFit,
                                       tilt_fit: SinusoidFit) -> list:
-        """
-        Cross-fit consistency warnings (3.0; warnings only).
+        """Collect cross-fit consistency warnings; they never change status.
 
         Both sinusoids measure the sample's intrinsic tilt, so their
         amplitudes should agree to within a factor and their phases
@@ -518,9 +563,10 @@ class SEMGeometryCalculator:
                 or larger / smaller > FIT_AMPLITUDE_RATIO_MAX):
             warnings.append(
                 f"Scan-rotation and stage-tilt fit amplitudes disagree "
-                f"({math.degrees(scan_fit.amplitude_rad):.2f} vs "
-                f"{math.degrees(tilt_fit.amplitude_rad):.2f} deg); was "
-                f"stage-tilt and/or scan rotation changed at each position?"
+                f"({math.degrees(scan_fit.amplitude_rad):.2f}° vs "
+                f"{math.degrees(tilt_fit.amplitude_rad):.2f}°); were "
+                f"stage tilt and scan rotation both adjusted at every "
+                f"position?"
             )
         if (scan_fit.amplitude_rad >= MIN_FIT_AMPLITUDE_RAD
                 and tilt_fit.amplitude_rad >= MIN_FIT_AMPLITUDE_RAD):
@@ -529,9 +575,10 @@ class SEMGeometryCalculator:
             if quadrature_deviation_deg > QUADRATURE_TOLERANCE_DEG:
                 warnings.append(
                     f"Scan-rotation and stage-tilt fits are "
-                    f"{quadrature_deviation_deg:.1f} deg out of "
-                    f"quadrature (expected ~90 deg phase offset); was "
-                    f"stage-tilt and/or scan rotation changed at each position?"
+                    f"{quadrature_deviation_deg:.1f}° out of "
+                    f"quadrature (expected ~90° phase offset); were "
+                    f"stage tilt and scan rotation both adjusted at "
+                    f"every position?"
                 )
         return warnings
 
@@ -541,9 +588,10 @@ class SEMGeometryCalculator:
 
     @staticmethod
     def _rotation_span_rad(rotations_rad: Sequence[float]) -> float:
-        """
-        Circular span covered by the stage rotations: 2*pi minus the
-        largest gap between consecutive sorted (wrapped) rotations.
+        """Circular span covered by the stage rotations.
+
+        Computed as 2*pi minus the largest gap between consecutive
+        sorted (wrapped) rotations.
         """
         if len(rotations_rad) < 2:
             return 0.0
@@ -555,8 +603,7 @@ class SEMGeometryCalculator:
 
     @staticmethod
     def _fit_sinusoid(x: np.ndarray, y: np.ndarray) -> SinusoidFit:
-        """
-        Linear least-squares fit of ``y = a1*sin(x) + a2*cos(x) + C``.
+        """Linear least-squares fit of ``y = a1*sin(x) + a2*cos(x) + C``.
 
         The model is rewritten in amplitude/phase form on return:
         ``y = A * sin(x - phi0) + C`` with ``A = sqrt(a1^2 + a2^2)``
@@ -609,8 +656,7 @@ class SEMGeometryCalculator:
 
     @staticmethod
     def _find_zero_crossings(fit: SinusoidFit) -> Optional[Tuple[float, float]]:
-        """
-        Solve ``A * sin(x - phi0) + C = 0`` for x in [0, 2*pi).
+        """Solve ``A * sin(x - phi0) + C = 0`` for x in [0, 2*pi).
 
         Returns:
             A pair of solutions (x1, x2), each in [0, 2*pi). Returns
@@ -630,8 +676,7 @@ class SEMGeometryCalculator:
 
     @staticmethod
     def _wrap_to_signed_pi(angle_rad: float) -> float:
-        """
-        Wrap an angle into the half-open interval (-pi, pi].
+        """Wrap an angle into the half-open interval (-pi, pi].
 
         Used so that displayed stage rotations are reported as small
         signed values (e.g. -177 deg instead of 183 deg) which match
@@ -646,7 +691,7 @@ class SEMGeometryCalculator:
 
 
 # -----------------------------------------------------------------
-# Measured perpendicular candidates (new in 3.0)
+# Measured Perpendicular Candidates
 # -----------------------------------------------------------------
 
 # A measured position counts as "already perpendicular in rotation" when
@@ -673,15 +718,14 @@ class SemPositionCandidate:
     source_detail: str = ""
 
 
-def measured_perpendicular_candidates(
-    records: Sequence[SpinMillImageMetadata],
-    target_milling_angle_deg: float,
+def measured_perpendicular_candidates_from_inputs(
+    inputs: SEMGeometryInputs,
+    details: Sequence[str] = (),
     tolerance_rad: float = MEASURED_SCAN_ROTATION_TOLERANCE_RAD,
 ) -> list[SemPositionCandidate]:
-    """
-    Measured positions whose |scan rotation| <= tolerance.
+    """Measured positions whose |folded scan rotation| <= tolerance.
 
-    PHYSICS (confirm with domain expert): scan rotation ~ 0 means the
+    Physics note (confirm with a domain expert): scan rotation ~ 0 means the
     surface normal already lies in the FIB-SEM plane at that stage
     rotation, but the position was captured at the *milling* tilt
     (grazing angle alpha). The same closed-form correction used for the
@@ -689,29 +733,55 @@ def measured_perpendicular_candidates(
 
         theta_final = theta_measured + radians(38 - alpha)
 
+    The comparison uses the per-record fold about 0 (ellipse orientation
+    is pi-periodic, so an untouched 180-baseline position qualifies
+    exactly like a 0-baseline one) — deliberately not the cluster-
+    anchored fold: whether one position is perpendicular must not depend
+    on which other positions were loaded alongside it.
+
     The stage rotation is the measured value unchanged (wrapped to
     (-pi, pi] for display consistency). Rounding matches the fitted
-    candidates (INTERNAL_RAD_PRECISION). Order follows ``records``
-    (natural-sorted by the batch parser). A position whose scan
-    rotation was simply never adjusted also qualifies — by design, the
-    page reports the data it has; the cross-fit consistency warning is
-    the flag for that situation.
+    candidates (INTERNAL_RAD_PRECISION). Order follows the inputs. A
+    position whose scan rotation was simply never adjusted also
+    qualifies — by design, the page reports the data it has; the
+    cross-fit consistency warning is the flag for that situation.
+    ``details`` (optional, parallel to the inputs) fills each row's
+    ``source_detail`` — file names on the SEM page, position labels on
+    the alignment page.
     """
     delta_theta_rad = math.radians(
-        FIB_ANGLE_FROM_STAGE_PLANE_DEG - target_milling_angle_deg)
+        FIB_ANGLE_FROM_STAGE_PLANE_DEG - inputs.target_milling_angle_deg)
     candidates: list[SemPositionCandidate] = []
-    for record in records:
-        if abs(record.scan_rotation_rad) > tolerance_rad:
+    triples = zip(inputs.stage_rotations_rad, inputs.stage_tilts_rad,
+                  inputs.scan_rotations_rad)
+    for index, (stage_r, stage_t, scan_r) in enumerate(triples):
+        if abs(fold_scan_rotation_rad(scan_r)) > tolerance_rad:
             continue
         candidates.append(SemPositionCandidate(
             source=SOURCE_MEASURED,
             stage_rotation_rad=round(
-                SEMGeometryCalculator._wrap_to_signed_pi(
-                    record.stage_rotation_rad),
+                SEMGeometryCalculator._wrap_to_signed_pi(stage_r),
                 INTERNAL_RAD_PRECISION),
             stage_tilt_rad=round(
-                record.stage_tilt_rad + delta_theta_rad,
+                stage_t + delta_theta_rad,
                 INTERNAL_RAD_PRECISION),
-            source_detail=record.file_name,
+            source_detail=details[index] if index < len(details) else "",
         ))
     return candidates
+
+
+def measured_perpendicular_candidates(
+    records: Sequence[SpinMillImageMetadata],
+    target_milling_angle_deg: float,
+    tolerance_rad: float = MEASURED_SCAN_ROTATION_TOLERANCE_RAD,
+) -> list[SemPositionCandidate]:
+    """Record-based convenience wrapper (the SEM Angle Calc page's
+    path): builds the inputs from parsed image records and passes the
+    file names through as the rows' provenance details."""
+    inputs = SEMGeometryInputs.from_records(records,
+                                            target_milling_angle_deg)
+    return measured_perpendicular_candidates_from_inputs(
+        inputs,
+        details=[record.file_name for record in records],
+        tolerance_rad=tolerance_rad,
+    )

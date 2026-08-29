@@ -39,6 +39,11 @@ Item {
     // Show the Source column (candidate provenance) before the filler.
     property bool showSource: false
 
+    // Source column width; pages with short provenance details (the
+    // alignment page's "Position 2") narrow it so the R/T columns stay
+    // on-screen inside a 400 px card without horizontal scroll.
+    property int sourceColumnWidth: AppConfig.tableSourceColumnWidth
+
     // Empty-state label; pages override it with context-specific
     // guidance (e.g. the Position Alignment page's minimum-rows hint).
     property string emptyText: "No calculated positions."
@@ -55,7 +60,7 @@ Item {
     // width the component grants beyond this is absorbed by the filler.
     readonly property int fixedRowWidth:
         AppConfig.tableIndexColumnWidth
-        + (showSource ? AppConfig.tableSourceColumnWidth
+        + (showSource ? sourceColumnWidth
                         + AppConfig.tableColumnSpacing : 0)
         + 2 * AppConfig.tableAngleColumnWidth
         + 3 * AppConfig.tableColumnSpacing
@@ -82,7 +87,7 @@ Item {
 
     // Height of exactly n data rows: header + separator + n rows + the
     // horizontal bar's lane. The one place this table's vertical metric
-    // lives — hosts size the table in ROWS (preferredRows) rather than in
+    // lives — hosts size the table in rows (preferredRows) rather than in
     // hand-tuned pixels, so a row-height or font change cannot silently
     // invalidate them.
     function heightForRows(n) {
@@ -130,7 +135,7 @@ Item {
     // alignment page's geometry is unchanged.
     component SourceCell: ToolTippedLabel {
 
-        width: AppConfig.tableSourceColumnWidth
+        width: root.sourceColumnWidth
         height: AppConfig.tableRowHeight
         font.pixelSize: AppConfig.tableCellFontSize
         color: AppConfig.universalForeground
@@ -234,7 +239,7 @@ Item {
 
                     // Named, prefixed roles — no collisions with Item's own
                     // x/y/rotation properties. `source`/`sourceDetail` are
-                    // OPTIONAL (absent from the alignment page's model), so
+                    // optional (absent from the alignment page's model), so
                     // they are read via the model object: a named required
                     // property would abort delegate creation when the role
                     // is missing.
@@ -315,6 +320,13 @@ Item {
         anchors.centerIn: parent
         visible: rowsView.count === 0
         text: root.emptyText
+        // The empty text can be a full calculator status sentence (the
+        // alignment page binds the SEM verdict here) — wrap inside the
+        // component instead of overflowing the card.
+        width: Math.min(implicitWidth,
+                        root.width - 2 * AppConfig.tableColumnSpacing)
+        wrapMode: Text.WordWrap
+        horizontalAlignment: Text.AlignHCenter
         font.pixelSize: AppConfig.tableCellFontSize
         color: AppConfig.universalForeground
 

@@ -7,10 +7,9 @@ byte after ``IonBeamTiltAngle``; latin-1 never fails and every tag and
 number we read is pure ASCII. Slicing from ``<Metadata`` (past the XML
 declaration) also keeps ``ElementTree`` happy with a decoded str.
 
-Deliberately stateless module functions (the 2.3 parser accumulated
-results across loads in an instance dict) and deliberately Qt-free so the
-future Position Alignment automation can import it alongside
-:mod:`spin_mill_geometry`.
+Deliberately stateless module functions (no results accumulate across
+loads) and deliberately Qt-free so :mod:`sem_geometry_calculator` can
+import it alongside :mod:`spin_mill_geometry`.
 """
 from __future__ import annotations
 
@@ -115,10 +114,10 @@ def parse_spin_mill_images(
 ) -> Tuple[List[SpinMillImageMetadata], List[str]]:
     """Batch parse, natural-sorted by file name.
 
-    Continues past bad files (the 2.3 parser's bare except aborted the
-    whole batch on the first failure). Returns ``(records, errors)`` where
-    each error string is ``"name: reason"``. Duplicate file names from
-    different directories are all kept, in sorted order.
+    Continues past bad files rather than aborting the whole batch on the
+    first failure. Returns ``(records, errors)`` where each error string
+    is ``"name: reason"``. Duplicate file names from different
+    directories are all kept, in sorted order.
     """
     records: List[SpinMillImageMetadata] = []
     errors: List[str] = []

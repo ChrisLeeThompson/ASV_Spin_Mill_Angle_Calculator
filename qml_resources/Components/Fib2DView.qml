@@ -10,8 +10,8 @@ import "../Js"
 // AOI ellipse seen edge-on: its tilt from horizontal is the stage tilt
 // (milling angle − 38°), so at milling angle 0 it lies parallel to the FIB
 // beam. A pink arc pivoted at the center spans from the FIB line to the
-// blue line's right arm — its sweep IS the milling angle — with a degree
-// readout at the arc's midpoint.
+// blue line's right arm — its sweep equals the milling angle — with a
+// degree readout at the arc's midpoint.
 //
 // Screen-angle convention (matches Js/diagramFunctions.js): 0° = horizontal
 // right, positive = counter-clockwise. The figure is fluid — all geometry
@@ -41,7 +41,7 @@ Item {
         Math.max(-38.0, Math.min(60.0, millingAngleDeg - 38.0))
 
     // Animated copy of the tilt: the Behavior sweeps the figure smoothly
-    // whenever the bound milling angle changes (Hydra-style).
+    // whenever the bound milling angle changes.
     property real displayedTiltDeg: clampedTiltDeg
 
     Behavior on displayedTiltDeg {

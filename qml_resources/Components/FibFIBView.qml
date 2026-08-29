@@ -26,8 +26,8 @@ Item {
     property real ellipseHeightUm: 55.8
 
     // Animated copies: the Behaviors sweep the shape and the chip readouts
-    // smoothly whenever the bound inputs change (Hydra-style). A diameter
-    // shrink that trips the page's height clamp animates both concurrently.
+    // smoothly whenever the bound inputs change. A diameter shrink that
+    // trips the page's height clamp animates both concurrently.
     property real displayedDiameterUm: aoiDiameterUm
     property real displayedEllipseHeightUm: ellipseHeightUm
 
@@ -88,7 +88,7 @@ Item {
         // the first look at the tab is never a stale/blank texture.
         onVisibleChanged: if (visible) requestPaint()
 
-        // Watch BOTH radii: in the height-limited regime the minor axis
+        // Watch both radii: in the height-limited regime the minor axis
         // is constant (the ratio cancels out of budget/ratio * ratio)
         // while the major axis animates, so minorRadius alone misses
         // repaints and the figure renders stale.

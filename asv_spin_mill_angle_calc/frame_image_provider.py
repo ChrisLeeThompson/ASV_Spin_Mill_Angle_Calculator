@@ -3,8 +3,7 @@
 Holds the single most-recent ``QImage`` (latest-frame-wins). The alignment
 worker writes from its thread; QML's render thread reads via
 ``requestImage`` — the swap is guarded by a lock so a half-written frame
-is never read. Ported from the sibling Direct Adjustments Analyzer's
-``backend/image_provider.py``.
+is never read.
 
 Registered on the QML engine as ``"fibAlignment"`` by the entry point;
 QML consumes it as ``Image { source: "image://fibAlignment/frame?seq=N" }``

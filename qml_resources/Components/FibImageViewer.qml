@@ -11,9 +11,13 @@ import "../Js/diagramFunctions.js" as DiagramFunctions
 // Layers: placeholder label (no frame yet) -> live Image (provider-fed,
 // letterboxed with preserved aspect ratio) -> Canvas overlay (frame-center
 // reference cross, detected ellipse + center marker, drawn in display
-// pixels so strokes stay crisp at any window size) -> success chips
-// (ellipse width/height, the FIB-page chip style). Per-step status and
-// measured readouts live in the page's Status Log card, not here.
+// pixels so strokes stay crisp at any window size) -> measurement chips
+// (ellipse width/height only, the FIB-page chip style).
+//
+// The chip row is deliberately limited to the two measurements: this card
+// exists to show the ellipse, and everything else the run has to say —
+// per-step status, measured readouts, and the run's advisories — belongs
+// in the page's Status Log card, which has room to say it in words.
 //
 // The overlay maps image pixels to display pixels through the Image's
 // painted geometry (paintedWidth/sourceSize), so it stays registered
@@ -31,14 +35,12 @@ Item {
     // rotationDeg, millingAngleDeg, widthUm, heightUm, offsetXUm,
     // offsetYUm.
     property var ellipseFit: ({})
-    // "idle" | "running" | "success" | "exception" — picks the overlay
-    // color; the page maps the same state onto the Card border.
+    // "idle" | "running" | "success" | "updated" | "exception" — picks
+    // the overlay color; the page maps the same state onto the Card
+    // border. "updated" (a manual Update re-capture) keeps the accent
+    // overlay: green is reserved for a routine-verified alignment.
     property string viewerState: "idle"
     property string idleText: "No FIB image."
-    // Advisories from the last finished run (width mismatch, mid-run
-    // re-anchor). Shown as an amber chip on success; full texts live
-    // in the Status Log card, the chip's tooltip repeats them.
-    property var warnings: []
 
     readonly property bool hasFit: !!ellipseFit
                                    && ellipseFit.valid === true
@@ -179,10 +181,14 @@ Item {
             }
 
             // Ellipse width/height chips (the FIB-page readout-chip
-            // style), shown once a run ends in success.
+            // style). Shown whenever a fit is displayed — the chips
+            // describe the overlay ellipse (drawn on hasFit), so their
+            // visibility matches it rather than the run outcome; an
+            // Update re-capture legitimately shows a fit outside a
+            // successful run.
             Row {
 
-                visible: root.viewerState === "success" && root.hasFit
+                visible: root.hasFit
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 8
@@ -229,41 +235,6 @@ Item {
                         font.pixelSize: AppConfig.fibViewerFooterFontSize
 
                     }
-
-                }
-
-                Rectangle {
-
-                    visible: root.warnings.length > 0
-                    width: advisoryReadout.implicitWidth + 12
-                    height: advisoryReadout.implicitHeight + 4
-                    radius: AppConfig.buttonRadius
-                    color: AppConfig.universalBackground
-                    border.color: AppConfig.activityExceptionColor
-                    border.width: 1
-
-                    Label {
-
-                        id: advisoryReadout
-                        anchors.centerIn: parent
-                        text: "⚠ " + root.warnings.length
-                              + (root.warnings.length > 1
-                                 ? " advisories" : " advisory")
-                        color: AppConfig.activityExceptionColor
-                        font.pixelSize: AppConfig.fibViewerFooterFontSize
-
-                    }
-
-                    MouseArea {
-
-                        id: advisoryHover
-                        anchors.fill: parent
-                        hoverEnabled: true
-
-                    }
-
-                    ToolTip.visible: advisoryHover.containsMouse
-                    ToolTip.text: root.warnings.join("\n")
 
                 }
 

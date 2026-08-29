@@ -1,5 +1,4 @@
-"""
-Module detects the milled fiducial ellipse in grazing-incidence FIB images.
+"""Detect the milled fiducial ellipse in grazing-incidence FIB images.
 
 The detector locates the thin ring left by the spin mill fiducial
 circle when viewed by the FIB at grazing incidence, and fits an ellipse
@@ -101,6 +100,13 @@ _TROUGH_MIN_DEPTH_SIGMA = 1.5
 _TROUGH_STRONG_DEPTH_SIGMA = 3.0
 _TROUGH_TRIM_REF_PX = 2.5
 _TROUGH_MIN_COUNT = 30
+# How far the intensity refinement may move the semi-major axis away
+# from the caller's pinned prior before the refined fit is rejected and
+# the vote lock (whose `a` is the pinned value) stands instead. Exported
+# because it is a cliff, not a soft limit: past it the reported milling
+# angle asin(b/a) inherits the pinned width's error wholesale, so
+# AlignmentConfig validates that its width advisory fires first.
+REFINE_SEMI_MAJOR_GUARD_FRAC = 0.08
 # A real milled groove is continuous around the perimeter; a pair of
 # horizontal clutter bands spaced ~2b mimics the flat arcs but leaves
 # two ~100-degree holes around the tips. Reject fits whose troughs
@@ -118,8 +124,7 @@ _VOTE_MIN_STRONG_COVERAGE = 0.10
 
 @dataclass(frozen=True)
 class EllipseDetectorConfig:
-    """
-    Tunable parameters and geometry priors for the detector.
+    """Tunable parameters and geometry priors for the detector.
 
     The default priors describe the spin mill fiducial as imaged by
     the ASV workflow: a wide, very flat, near-horizontal ellipse
@@ -203,8 +208,7 @@ class EllipseDetectorConfig:
 
 @dataclass(frozen=True)
 class ExpectedGeometry:
-    """
-    Optional per-frame priors from the caller's physical model.
+    """Optional per-frame priors from the caller's physical model.
 
     Attributes:
         semi_major_px: Expected semi-major axis in pixels (AOI radius
@@ -237,8 +241,7 @@ class ExpectedGeometry:
 
 @dataclass(frozen=True)
 class EllipseFit:
-    """
-    Immutable result of a fiducial ellipse detection.
+    """Immutable result of a fiducial ellipse detection.
 
     Attributes:
         center_x_px, center_y_px: Ellipse center in image pixels.
@@ -293,8 +296,7 @@ class EllipseFit:
 # -----------------------------------------------------------------
 
 class FiducialEllipseDetector:
-    """
-    Stateless fiducial-ellipse detector (numpy + OpenCV only).
+    """Stateless fiducial-ellipse detector (numpy + OpenCV only).
 
     A single public method ``detect`` consumes a 2D grayscale image
     array and returns an ``EllipseFit`` or ``None`` when no ellipse
@@ -317,8 +319,7 @@ class FiducialEllipseDetector:
     def detect(self, image: np.ndarray,
                expected: Optional[ExpectedGeometry] = None,
                ) -> Optional[EllipseFit]:
-        """
-        Detect the fiducial ellipse in a grayscale image.
+        """Detect the fiducial ellipse in a grayscale image.
 
         Args:
             image: 2D uint8/uint16/float array. Color images are
@@ -336,17 +337,18 @@ class FiducialEllipseDetector:
     def detect_all(self, image: np.ndarray,
                    expected: Optional[ExpectedGeometry] = None,
                    ) -> Tuple[EllipseFit, ...]:
-        """
-        Detect under every allowed polarity, ranked best first by
-        (coverage, inliers, -rms) — arc-coverage first, because on real
-        frames the inlier count rewards clutter harvesting.
+        """Detect under every allowed polarity, ranked best first.
+
+        Ranking is (coverage, inliers, -rms) — arc-coverage first,
+        because on real frames the inlier count rewards clutter
+        harvesting.
 
         When the caller pins the semi-major axis (ExpectedGeometry from
         a known AOI diameter) the known-shape center-vote is the
         primary path and may return several distinct hypotheses per
         polarity, so a caller with its own acceptance gates can fall
         back to a runner-up instead of losing the whole frame. Without
-        that prior, guided RANSAC runs as before (AOI-unknown mode).
+        that prior, guided RANSAC is the only path (AOI-unknown mode).
         """
         cfg = self._cfg
         gray = self._to_gray(image)
@@ -608,8 +610,8 @@ class FiducialEllipseDetector:
         """Template vote over the full (b, tilt) hypothesis grid at the
         AOI-pinned semi-major axis.
 
-        The grid is NOT strided or coarsened: both were tried against
-        the real corpus and rejected — coarser max-pooling fills
+        The grid is neither strided nor coarsened: both were tried
+        against the real corpus and rejected — coarser max-pooling fills
         clutter-band gaps into solid runs faster than it thickens the
         thin ring, and striding both dimensions loses weak rings whose
         (b, tilt) falls between samples. Cost is contained instead by
@@ -779,7 +781,7 @@ class FiducialEllipseDetector:
         trim against them (structured outliers — debris on the arc, a
         parallel groove edge — are spatially coherent and would drag
         the algebraic fit), free-fit, one MAD rejection pass.
-        ``coverage`` becomes the STRONG-trough fraction: the share of
+        ``coverage`` becomes the strong-trough fraction: the share of
         perimeter normals whose valley depth clears
         ``_TROUGH_STRONG_DEPTH_SIGMA``. Unlike point-mask sector
         occupancy this cannot saturate on dense clutter, and shallow
@@ -809,7 +811,8 @@ class FiducialEllipseDetector:
             refined = self._fit_direct(kept)
             if (refined is None
                     or not self._geometry_ok(refined, w, h, expected)
-                    or abs(refined[2] - params0[2]) > 0.08 * params0[2]):
+                    or abs(refined[2] - params0[2])
+                    > REFINE_SEMI_MAJOR_GUARD_FRAC * params0[2]):
                 break
             residuals = self._sampson_distance(kept, refined)
             mad = float(np.median(np.abs(residuals - np.median(residuals))))
@@ -820,7 +823,7 @@ class FiducialEllipseDetector:
                 if (refit is not None
                         and self._geometry_ok(refit, w, h, expected)
                         and abs(refit[2] - params0[2])
-                        <= 0.08 * params0[2]):
+                        <= REFINE_SEMI_MAJOR_GUARD_FRAC * params0[2]):
                     refined = refit
                     troughs, depths = kept[keep], kept_depths[keep]
             params = refined
@@ -839,7 +842,7 @@ class FiducialEllipseDetector:
                 "Ellipse candidate rejected (%s ring): only %d strong "
                 "troughs — noise, not a groove", polarity, strong)
             return None
-        # Gap criterion over STRONG troughs only: shallow noise minima
+        # Gap criterion over strong troughs only: shallow noise minima
         # pass the acceptance threshold often enough (extreme-value
         # statistics of the sampled profile) to plug the tip holes a
         # clutter-band pair leaves — deep groove evidence does not lie.
@@ -907,11 +910,9 @@ class FiducialEllipseDetector:
 
     @classmethod
     def _sampson_distance(cls, points: np.ndarray, params) -> np.ndarray:
-        """
-        First-order geometric (Sampson) distance from points to the
-        ellipse, vectorized in numpy. Accurate near the curve, which
-        is exactly where the inlier tolerance operates.
-        """
+        """First-order geometric (Sampson) distance from points to
+        the ellipse, vectorized in numpy. Accurate near the curve,
+        which is exactly where the inlier tolerance operates."""
         A, B, C, D, E, F = cls._conic_coefficients(*params)
         x, y = points[:, 0], points[:, 1]
         q = A * x * x + B * x * y + C * y * y + D * x + E * y + F

@@ -29,6 +29,13 @@ Pane {
     property string title: ""
     property bool titleBold: true
 
+    // Optional trailing slot on the title line, right-justified (a
+    // summary readout, a small action). Items declared here sit in line
+    // with the title rather than below it, which the default `content`
+    // alias cannot express. The title elides to yield space, so a long
+    // title never pushes the slot off the card.
+    property alias headerExtra: headerExtraArea.data
+
     focusPolicy: Qt.StrongFocus
     padding: AppConfig.containerPadding
 
@@ -48,15 +55,37 @@ Pane {
 
         // Declared first so call-site children (appended via the default
         // alias) land below it. ColumnLayout skips it when invisible, so
-        // titleless cards are unaffected.
-        Label {
+        // titleless cards are unaffected — the header is invisible only
+        // when there is neither a title nor a trailing item.
+        RowLayout {
 
+            id: headerRow
             visible: root.title !== ""
-            text: root.title
-            font.pixelSize: AppConfig.containerTitleFontSize
-            font.bold: root.titleBold
+                     || headerExtraArea.children.length > 0
             Layout.fillWidth: true
-            elide: Text.ElideRight
+            spacing: AppConfig.containerSpacing
+
+            Label {
+
+                visible: root.title !== ""
+                text: root.title
+                font.pixelSize: AppConfig.containerTitleFontSize
+                font.bold: root.titleBold
+                // Takes the slack so the trailing slot is pushed right,
+                // and elides rather than squeezing it.
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+
+            }
+
+            RowLayout {
+
+                id: headerExtraArea
+                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                spacing: AppConfig.containerSpacing
+                visible: children.length > 0
+
+            }
 
         }
 

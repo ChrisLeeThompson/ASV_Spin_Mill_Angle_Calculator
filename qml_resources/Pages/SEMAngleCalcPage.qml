@@ -133,10 +133,10 @@ Item {
         // table's columns; AlignHCenter centers them once the window exceeds
         // that cap.
         //
-        // Heights are fixed capacities, declared in ROWS (preferredRows —
+        // Heights are fixed capacities, declared in rows (preferredRows —
         // each table converts to pixels itself): the cards are the same size
         // empty and loaded, so loading images never reflows the stack, and
-        // rows past the capacity scroll. Deliberately NOT fillHeight: the
+        // rows past the capacity scroll. Deliberately not fillHeight: the
         // Results card below is the only item that fills, so every spare
         // pixel on a tall window goes to the one view that can actually use
         // it — the audit block.
@@ -176,9 +176,14 @@ Item {
 
                 id: calculatedSemPositionsTable
                 showSource: true
-                // Same wording as the Position Alignment page's table and as
-                // the status bar's insufficient-data message.
-                emptyText: "3 or more positions required."
+                // Same wording as the Position Alignment page's table.
+                // This card has two row sources, and only the Calculated
+                // rows need three positions — a measured
+                // (already-perpendicular) position is emitted from a
+                // single one, so the empty text must describe both.
+                emptyText: "3 or more positions required to calculate. "
+                           + "A position already perpendicular in rotation "
+                           + "is listed as Measured."
                 // Per-category explanations for the Source tooltips.
                 // Keys must match the SOURCE_* constants in
                 // sem_geometry_calculator.py.

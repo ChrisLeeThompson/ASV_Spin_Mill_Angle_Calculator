@@ -73,7 +73,7 @@ Item {
 
     // Height of exactly n data rows: header + separator + n rows + the
     // horizontal bar's lane. The one place this table's vertical metric
-    // lives — hosts size the table in ROWS (preferredRows) rather than in
+    // lives — hosts size the table in rows (preferredRows) rather than in
     // hand-tuned pixels, so a row-height or font change cannot silently
     // invalidate them.
     function heightForRows(n) {

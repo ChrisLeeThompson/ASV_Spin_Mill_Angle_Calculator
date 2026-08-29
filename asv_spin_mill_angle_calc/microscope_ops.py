@@ -178,6 +178,35 @@ def read_position_record(ops: MicroscopeOps) -> PositionRecord:
     )
 
 
+def restore_position(ops: MicroscopeOps, record: PositionRecord) -> None:
+    """Go To's actuation: drive back to a confirmed position record.
+
+    The exact inverse of :func:`read_position_record` for everything the
+    instrument lets us command — stage X/Y/R/T, ion beam shift, and FIB
+    scan rotation — so the framing the operator confirmed is reproduced,
+    not merely approached. Working distance is not written: it is a
+    focus readback, not a commandable axis on this seam.
+
+    Ordering is deliberate: the stage move first (it is the coarse,
+    slow, mechanically-limited motion), then the two electron-optical
+    trims, so a stop or a failure mid-way leaves the beam settings
+    matching the stage rather than the other way round.
+
+    Z is deliberately never passed — the module's zeroed-Z trap: an
+    unspecified axis must stay unspecified, and a 0.0 Z is a chamber
+    collision. Tilt-floor policy belongs to the caller (the controller
+    checks it before committing), matching this module's no-policy rule.
+    """
+    ops.stage.absolute_move(
+        x_m=record.stage_x_m,
+        y_m=record.stage_y_m,
+        r_deg=math.degrees(record.stage_r_rad),
+        t_deg=math.degrees(record.stage_t_rad),
+    )
+    ops.ion_beam.set_beam_shift_m(record.beam_x_m, record.beam_y_m)
+    ops.ion_beam.set_scan_rotation_deg(math.degrees(record.scan_r_rad))
+
+
 # -----------------------------------------------------------------
 # Real AutoScript implementations
 # -----------------------------------------------------------------

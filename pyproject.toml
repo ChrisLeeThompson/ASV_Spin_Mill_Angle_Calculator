@@ -23,6 +23,7 @@ files = [
     "asv_spin_mill_angle_calc/sem_geometry_calculator.py",
     "asv_spin_mill_angle_calc/sem_geometry_result_formatter.py",
     "asv_spin_mill_angle_calc/sem_positions_models.py",
+    "asv_spin_mill_angle_calc/settings_controller.py",
     "asv_spin_mill_angle_calc/spin_mill_geometry.py",
     "qml_resources/Components/Card.qml",
     "qml_resources/Components/ConfirmDialog.qml",
@@ -46,6 +47,7 @@ files = [
     "qml_resources/Pages/FIBAngleCalcPage.qml",
     "qml_resources/Pages/PositionAlignmentPage.qml",
     "qml_resources/Pages/SEMAngleCalcPage.qml",
+    "qml_resources/Pages/SettingsPage.qml",
     "qml_resources/Pages/qmldir",
     "qml_resources/main.qml",
 ]

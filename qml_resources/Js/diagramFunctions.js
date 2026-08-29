@@ -1,12 +1,11 @@
 .pragma library
 
 // =============================================================================
-// DIAGRAM FUNCTIONS
+// Diagram Functions
 //
-// Generic Canvas drawing utilities for the beam-geometry figures (borrowed
-// from Hydra Bio Cryo Utilities 3.0, trimmed to the primitives used here).
+// Generic Canvas drawing utilities for the beam-geometry figures.
 //
-// This library contains NO instrument geometry — callers pass screen angles
+// This library contains no instrument geometry — callers pass screen angles
 // in. For example, the FIB reference line is drawn with:
 //
 //     DiagramFunctions.drawRadialLine(ctx, cx, cy, 0, len,
@@ -19,7 +18,7 @@
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// CORE DRAWING
+// Core Drawing
 // -----------------------------------------------------------------------------
 
 // Generic line drawing function (used internally by other draw functions).
@@ -33,7 +32,7 @@ function drawLine(ctx, startX, startY, endX, endY, strokeStyle, lineWidth) {
 }
 
 // -----------------------------------------------------------------------------
-// RADIAL LINES - Lines at arbitrary screen angles from the figure center
+// Radial Lines — lines at arbitrary screen angles from the figure center
 // -----------------------------------------------------------------------------
 
 // Draw a radial line starting at the reference circle edge, extending
@@ -61,7 +60,7 @@ function drawDiameterLine(ctx, centerX, centerY, referenceCircleRadius,
 }
 
 // -----------------------------------------------------------------------------
-// ARC DRAWING
+// Arc Drawing
 // -----------------------------------------------------------------------------
 
 // Draw an arc between two screen angles (counter-clockwise from startAngleDeg
@@ -79,12 +78,12 @@ function drawArc(ctx, centerX, centerY, radius, startAngleDeg,
 }
 
 // -----------------------------------------------------------------------------
-// ELLIPSE DRAWING
+// Ellipse Drawing
 // -----------------------------------------------------------------------------
 
 // Draw an axis-aligned ellipse outline centered at (centerX, centerY).
 // Uses Qt's non-standard Context2D ellipse(x, y, w, h) — a bounding-rect
-// signature that adds a closed subpath (NOT the HTML5 7-argument form).
+// signature that adds a closed subpath (not the HTML5 7-argument form).
 function drawEllipse(ctx, centerX, centerY, radiusX, radiusY,
                      strokeStyle, lineWidth) {
     ctx.strokeStyle = strokeStyle;
@@ -95,9 +94,9 @@ function drawEllipse(ctx, centerX, centerY, radiusX, radiusY,
     ctx.stroke();
 }
 
-// Draw a rotated ellipse outline. DIVERGES from this library's CCW
+// Draw a rotated ellipse outline. Diverges from this library's CCW
 // screen-angle convention: rotationDeg is the major-axis angle in the
-// canvas' y-down frame, positive CLOCKWISE — the cv2.fitEllipse
+// canvas' y-down frame, positive clockwise — the cv2.fitEllipse
 // convention the ellipse detector reports, passed through unchanged.
 function drawRotatedEllipse(ctx, centerX, centerY, radiusX, radiusY,
                             rotationDeg, strokeStyle, lineWidth) {
@@ -109,7 +108,7 @@ function drawRotatedEllipse(ctx, centerX, centerY, radiusX, radiusY,
 }
 
 // -----------------------------------------------------------------------------
-// DIMENSION ARROWS
+// Dimension Arrows
 // -----------------------------------------------------------------------------
 
 // Half-angle of the stroked V arrowheads. Fixed glyph geometry (like the
@@ -146,7 +145,7 @@ function drawDimensionArrow(ctx, x1, y1, x2, y2, headLength,
 }
 
 // -----------------------------------------------------------------------------
-// LABEL POSITIONING HELPERS
+// Label Positioning Helpers
 // -----------------------------------------------------------------------------
 
 // Calculate label position at the end of a radial line, optionally offset

@@ -43,7 +43,7 @@ Item {
         // Two-column body. Explicit Layout.row/column on every child —
         // auto-flow would misplace items after the image viewer's rowSpan.
         // The grid takes the window's surplus height, and row 3 is the
-        // ONLY row that can grow (both its cards fillHeight; rows 0-2 are
+        // only row that can grow (both its cards fillHeight; rows 0-2 are
         // capped by the fixed-height column-0 cards, so the image viewer
         // stays flush with the Spin Mill Positions card; do not add
         // Layout.verticalStretchFactor to the viewer — it would mark
@@ -219,6 +219,39 @@ Item {
 
                         ToolTippedLabel {
 
+                            id: numberOfPositionsLabel
+                            Layout.fillWidth: true
+                            text: "Number of Spin Mill Positions"
+                            toolTipText: Strings.numberOfPositionsLabelTooltip
+
+                        }
+
+                        CustomSpinBox {
+
+                            id: numberOfPositionsSB
+                            // Width floor follows the Target Milling Angle
+                            // row's idiom — robust against calcSpinBoxWidth
+                            // being 0 until the FIB page publishes it.
+                            Layout.preferredWidth: Math.max(
+                                                       implicitWidth, AppConfig.calcSpinBoxWidth)
+                            enabled: !appController.positionAlignment.isRunning
+                            decimals: 0
+                            from: 3
+                            to: 10
+                            value: 5
+                            stepSize: 1
+                            showArrows: true
+
+                        }
+
+                    }
+
+                    RowLayout {
+
+                        Layout.fillWidth: true
+
+                        ToolTippedLabel {
+
                             id: useBeamShiftLabel
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignLeft
@@ -257,8 +290,26 @@ Item {
                 title: "Spin Mill Positions"
                 titleBold: false
 
-                // Per-position readouts pulled from the microscope via
-                // AutoScript when the user clicks Confirm (see the column
+                // Run-quality summary, in line with the card title: the
+                // Angle column sits past the card's horizontal scroll, so
+                // this is the at-a-glance number. Hidden (rather than "—")
+                // until something has actually been measured; the header
+                // row's height is set by the title, so appearing and
+                // disappearing cannot resize the card.
+                headerExtra: Label {
+
+                    visible: appController.positionAlignment.hasAverageMillingAngle
+                    text: "Avg. milling angle: " + appController
+                          .positionAlignment.averageMillingAngle
+                          .toFixed(2) + "°"
+                    font.pixelSize: AppConfig.tableCellFontSize
+                    color: AppConfig.universalForeground
+
+                }
+
+                // Fixed slots 1..N mirroring ASV's Define Spin Mill
+                // Position activity. Confirm records the microscope's
+                // readouts into the lowest pending slot (see the column
                 // contract in PositionResultsTable.qml).
                 PositionResultsTable {
 
@@ -266,6 +317,24 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: AppConfig.tableHeight
                     model: appController.positionAlignment.positionsModel
+
+                    // Row actions. The table is a dumb component — it
+                    // emits the position number and the page does the
+                    // wiring. Note actionsEnabled is deliberately weaker
+                    // than the controller's own idle gate, which is what
+                    // actually refuses a mistimed action.
+                    actionsEnabled: !appController.positionAlignment.isRunning
+                                    && appController.microscope.isConnected
+                    canReconfirm: appController.positionAlignment.canReconfirm
+                    // Slots past the Number of Spin Mill Positions dim
+                    // and deactivate rather than disappear.
+                    activeCount: appController.positionAlignment.numberOfPositions
+                    onGoToRequested: (positionNumber) =>
+                        appController.positionAlignment.goToPosition(
+                            positionNumber)
+                    onReconfirmRequested: (positionNumber) =>
+                        appController.positionAlignment.reconfirmPosition(
+                            positionNumber)
 
                 }
 
@@ -290,12 +359,24 @@ Item {
                 titleBold: false
 
                 // SEM positions derived from the confirmed spin mill
-                // positions (the SEM page's sinusoid calculation) — at
-                // most two, once three or more positions are recorded.
+                // positions (the SEM page's sinusoid calculation): fitted
+                // primary/alternate once three or more rows fit, plus any
+                // measured (already-perpendicular) positions. The empty
+                // state shows the controller's SEM verdict — the
+                // minimum-rows hint before three positions exist, the
+                // calculator's own status line when a fit cannot produce
+                // candidates — so the table never looks silently stuck.
                 SemPositionsTable {
 
                     id: semPositionsTable
-                    emptyText: "3 or more positions required."
+                    emptyText: appController.positionAlignment.semStatusText
+                    showSource: true
+                    sourceColumnWidth: AppConfig.tableSourceColumnWidthNarrow
+                    sourceToolTips: ({
+                        "Calculated (primary)": Strings.semSourceCalculatedTooltip,
+                        "Calculated (alternate)": Strings.semSourceAlternateTooltip,
+                        "Measured": Strings.semSourceMeasuredTooltip
+                    })
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     model: appController.positionAlignment.semPositionsModel
@@ -323,14 +404,18 @@ Item {
                 title: "FIB View"
                 titleBold: false
                 // Border signals the run state: blue accent while the
-                // routine runs, green on a successful match, amber on an
-                // exception, default otherwise.
+                // routine runs, green on a successful match, blue again
+                // after an Update re-capture (green is reserved for a
+                // verified alignment run), amber on an exception, default
+                // otherwise.
                 borderColor: {
                     var state = appController.positionAlignment.viewerState
                     if (state === "running")
                         return AppConfig.universalAccent
                     if (state === "success")
                         return AppConfig.activityCompleteColor
+                    if (state === "updated")
+                        return AppConfig.activityUpdatedColor
                     if (state === "exception")
                         return AppConfig.activityExceptionColor
                     return AppConfig.containerBorderColor
@@ -344,7 +429,6 @@ Item {
                     frameSeq: appController.positionAlignment.frameSeq
                     ellipseFit: appController.positionAlignment.ellipseFit
                     viewerState: appController.positionAlignment.viewerState
-                    warnings: appController.positionAlignment.lastRunWarnings
 
                 }
 
@@ -399,10 +483,11 @@ Item {
                     leftPadding: AppConfig.buttonLeftRightPadding
                     rightPadding: AppConfig.buttonLeftRightPadding
                     text: "Clear Positions"
-                    // Clears both the spin mill and SEM positions tables.
-                    enabled: appController.positionAlignment.positionsModel.count > 0
+                    // Resets every slot to pending and clears the SEM
+                    // table; the Number of Spin Mill Positions is kept.
+                    enabled: appController.positionAlignment.canClear
                              && !appController.positionAlignment.isRunning
-                    onClicked: appController.positionAlignment.clearPositions()
+                    onClicked: clearPositionsDialog.open()
 
                 }
 
@@ -447,6 +532,30 @@ Item {
 
                 RoundButton {
 
+                    id: updateButton
+                    radius: AppConfig.buttonRadius
+                    padding: AppConfig.buttonPadding
+                    leftPadding: AppConfig.buttonLeftRightPadding
+                    rightPadding: AppConfig.buttonLeftRightPadding
+                    text: "Update"
+                    // Re-captures the current microscope state (fresh FIB
+                    // image + live readings) into the review view after a
+                    // manual adjustment — no alignment run required. The
+                    // card turns blue: the capture is recorded by hand,
+                    // not verified by the routine. Confirm then records
+                    // it as usual.
+                    enabled: appController.positionAlignment.canUpdate
+                             && appController.microscope.isConnected
+                    onClicked: appController.positionAlignment.updatePosition()
+                    ToolTip.text: Strings.updatePositionButtonTooltip
+                    ToolTip.delay: AppConfig.toolTipDelayMs
+                    ToolTip.timeout: AppConfig.toolTipTimeoutMs
+                    ToolTip.visible: hovered
+
+                }
+
+                RoundButton {
+
                     id: confirmButton
                     Layout.alignment: Qt.AlignRight
                     radius: AppConfig.buttonRadius
@@ -454,12 +563,20 @@ Item {
                     leftPadding: AppConfig.buttonLeftRightPadding
                     rightPadding: AppConfig.buttonLeftRightPadding
                     text: "Confirm"
-                    // Records the reviewed position into the Spin Mill
-                    // Positions table (SEM candidates recalculate once
-                    // three or more rows exist).
+                    // Records the reviewed position into the lowest
+                    // pending spin mill position (SEM candidates
+                    // recalculate once three or more slots are filled).
                     enabled: appController.positionAlignment.canConfirm
                              && appController.microscope.isConnected
                     onClicked: appController.positionAlignment.confirmPosition()
+                    // No tooltip while disabled: canConfirm is false for
+                    // several reasons (no reviewed capture yet, busy,
+                    // every slot recorded) and one blanket explanation
+                    // would be wrong for most of them.
+                    ToolTip.text: Strings.confirmButtonTooltip
+                    ToolTip.delay: AppConfig.toolTipDelayMs
+                    ToolTip.timeout: AppConfig.toolTipTimeoutMs
+                    ToolTip.visible: hovered && enabled
 
                 }
 
@@ -473,7 +590,7 @@ Item {
     // Python -> QML, the SEM page's Binding idiom in the other direction).
     // A Binding element survives the user's direct writes to `checked` (a
     // plain `checked:` binding would be destroyed by the first click) and
-    // re-asserts whenever its value CHANGES. `isConnecting` is OR-ed in so
+    // re-asserts whenever its value changes. `isConnecting` is OR-ed in so
     // the value transitions true -> false when a connect attempt fails —
     // with plain `isConnected` it would go false -> false and never
     // re-assert, leaving the switch stuck on after an error.
@@ -502,6 +619,11 @@ Item {
         property: "useBeamShift"
         value: useBeamShiftCheckBox.checked
     }
+    Binding {
+        target: appController.positionAlignment
+        property: "numberOfPositions"
+        value: numberOfPositionsSB.value
+    }
 
     // First-Start confirmation: the routine takes control of the stage.
     ConfirmDialog {
@@ -514,6 +636,15 @@ Item {
                 appController.positionAlignment.suppressStartDialog = true
             appController.positionAlignment.startAlignment()
         }
+    }
+
+    // Clearing resets every slot to pending with no undo — confirm
+    // first (default OK/Cancel, no suppress checkbox).
+    ConfirmDialog {
+        id: clearPositionsDialog
+        title: Strings.clearPositionsDialogTitle
+        message: Strings.clearPositionsDialogMessage
+        onAccepted: appController.positionAlignment.clearPositions()
     }
 
     // Modal notice when the routine would need a stage tilt at or past

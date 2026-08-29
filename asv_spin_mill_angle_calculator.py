@@ -1,33 +1,23 @@
-# This Python file uses the following encoding: utf-8
 """
 ASV Spin Mill Angle Calculator
-.
+
 A PySide6/QML desktop UI that assists setup of Thermo Fisher Auto Slice
 And View (ASV) spin milling on the Hydra Bio dual-beam FIB-SEM
-(AutoScript >= 4.13).
-.
+(AutoScript >= 4.13). Run this file to launch. Application logic lives in
+the ``asv_spin_mill_angle_calc`` package -- this module only wires up the
+Qt application, the QML engine, and the controllers.
+
 Authors: Chris Thompson (GitHub: ChrisLeeThompson) and Anthropic's Claude
-.
+
+If you have any questions or comments, please let me know.
+
+Thank you,
+Chris Thompson
+
 Copyright (c) 2026 Christopher Thompson.
-Released under the MIT License.
-.
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom the
-Software is furnished to do so, subject to the following conditions:
-.
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+Released under the MIT License -- see the LICENSE file, which also notes
+the Catbug icon in qml_resources/assets/ that is not covered by that
+license.
 """
 from __future__ import annotations
 
@@ -65,9 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     # (sourced from Config/AppConfig.qml) resolve on the first paint.
     QQuickStyle.setStyle("Universal")
 
-    # OS window / taskbar icon. The same asset is exposed to QML as
-    # AppConfig.catbugWaitingIcon, so the Python window icon and any in-window
-    # catbug graphics reference a single file on disk.
+    # OS window / taskbar icon.
     app.setWindowIcon(
         QIcon(str(base_dir / "qml_resources" / "assets" / "catbug_waiting_color.svg"))
     )

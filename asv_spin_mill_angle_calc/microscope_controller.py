@@ -6,17 +6,17 @@ StatusBar's right-corner indicator. Thin Qt orchestration over the Qt-free
 sibling controllers (functional ``Signal`` class attribute, single ``changed``
 notify, ``camelCase`` QML surface, ``_snake_case`` backing fields).
 
-Threading (the repo's first — mirrors Hydra's connect worker):
-``SdbMicroscopeClient.connect()`` blocks 1-3 s on a fast failure and up to
-~30 s on a slow timeout, so each connection attempt runs in a single-shot
-``_ConnectWorker`` on its own ``QThread``; results marshal back to the GUI
-thread through a queued signal. ``disconnect()`` is fast and stays synchronous.
+Threading: ``SdbMicroscopeClient.connect()`` blocks 1-3 s on a fast failure
+and up to ~30 s on a slow timeout, so each connection attempt runs in a
+single-shot ``_ConnectWorker`` on its own ``QThread``; results marshal back
+to the GUI thread through a queued signal. ``disconnect()`` is fast and
+stays synchronous.
 
 State machine: disconnected -> connecting -> connected | error;
 connected -> disconnected (user toggle-off); error -> connecting (re-toggle
-retries). Error is a real, terminal-until-retry state — unlike Hydra there is
-no silent simulation fallback, because a user-driven switch must not quietly
-become something other than what the user asked for.
+retries). Error is a real, terminal-until-retry state — there is no silent
+simulation fallback, because a user-driven switch must not quietly become
+something other than what the user asked for.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ _INDICATOR_TEXT = {
 class _ConnectWorker(QObject):
     """Single-shot worker for one connection attempt. Do not reuse.
 
-    All exceptions are caught here and logged — the ERROR-level tracebacks
+    All exceptions are caught here and logged — the error-level tracebacks
     below are the "(see console log)" target the UI points at. ``finished``
     carries the connected client, or None on any failure (exceptions must not
     cross the thread boundary).
@@ -72,7 +72,7 @@ class _ConnectWorker(QObject):
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._client_factory = client_factory
-        # Stashed immediately BEFORE finished is emitted on success; read by
+        # Stashed immediately before finished is emitted on success; read by
         # MicroscopeController.shutdown() to recover a client produced by a
         # connect that completed inside the shutdown race window (plain
         # Python attribute — safe to read even after deleteLater).
@@ -174,8 +174,8 @@ class MicroscopeController(QObject):
         return None
 
     # --- Actions (invoked from QML) ---------------------------------------
-    # Named connectMicroscope/disconnectMicroscope — NOT connect/disconnect,
-    # which would shadow QObject.connect/QObject.disconnect.
+    # Named connectMicroscope/disconnectMicroscope rather than connect/
+    # disconnect, which would shadow QObject.connect/QObject.disconnect.
 
     @Slot()
     def connectMicroscope(self) -> None:
@@ -195,7 +195,7 @@ class MicroscopeController(QObject):
             self._start_worker(worker)
             return
 
-        # Canonical single-shot worker-thread wiring (Hydra pattern).
+        # Canonical single-shot worker-thread wiring.
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -203,10 +203,10 @@ class MicroscopeController(QObject):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
 
-        # Identity-guarded ref cleanup (deliberate divergence from Hydra,
-        # which connects only once): this controller reconnects repeatedly,
-        # and an old thread's late `finished` must not null a NEW attempt's
-        # refs — that would break shutdown()'s quit-race recovery.
+        # Identity-guarded ref cleanup: this controller reconnects
+        # repeatedly, and an old thread's late `finished` must not null a
+        # newer attempt's refs — that would break shutdown()'s quit-race
+        # recovery.
         def _clear_refs(t: QThread = thread) -> None:
             if self._connect_thread is t:
                 self._connect_thread = None

@@ -3,9 +3,9 @@
 Owns the raw SDK object and the connect/disconnect lifecycle — including the
 connected flag AutoScript lacks (the SDK exposes only ``server_host``, and its
 ``disconnect()`` raises if the client is not connected, so callers need a
-guarded, idempotent surface). Mirrors the sibling Hydra project's
-``microscope/client.py``; the ``ops()`` accessor hands the Position Alignment
-backend its hardware seam (:mod:`asv_spin_mill_angle_calc.microscope_ops`).
+guarded, idempotent surface). The ``ops()`` accessor hands the Position
+Alignment backend its hardware seam
+(:mod:`asv_spin_mill_angle_calc.microscope_ops`).
 
 ``autoscript_sdb_microscope_client`` is imported lazily in ``__init__`` so this
 module (and the whole app) still loads on dev machines without AutoScript —
@@ -13,9 +13,11 @@ the import error surfaces only when a connection is actually attempted, where
 the controller reports it as a connection error.
 
 ``create_client`` is the connect-time simulation switch: setting the
-``ASV_SIMULATED_MICROSCOPE=1`` environment variable makes it return a
-:class:`SimulatedMicroscopeClient` instead. The switch is explicit and
-env-scoped on purpose — never a silent fallback when AutoScript is missing —
+``ASV_SIMULATED_MICROSCOPE=1`` environment variable — or flipping
+``DEV_FORCE_SIMULATION`` at the bottom of ``alignment_config.py`` — makes
+it return a
+:class:`SimulatedMicroscopeClient` instead. Both switches are explicit and
+user-set on purpose — never a silent fallback when AutoScript is missing —
 and a simulated session is visibly badged "(sim)" in the UI.
 """
 from __future__ import annotations
@@ -24,6 +26,7 @@ import logging
 import os
 from typing import Any
 
+from asv_spin_mill_angle_calc import alignment_config
 from asv_spin_mill_angle_calc.microscope_ops import (
     MicroscopeOps,
     build_autoscript_ops,
@@ -33,8 +36,8 @@ logger = logging.getLogger(__name__)
 
 # Host passed to SdbMicroscopeClient.connect(). None -> parameterless
 # connect(), which uses AutoScript's default (192.168.0.1, the support-PC to
-# microscope-PC link — matches the Hydra deployment). Set to e.g. "localhost"
-# when running directly on the microscope PC (Local scripting configuration).
+# microscope-PC link). Set to e.g. "localhost" when running directly on the
+# microscope PC (Local scripting configuration).
 MICROSCOPE_HOST: str | None = None
 
 # Environment switch for the simulated microscope ("1" enables), plus an
@@ -67,7 +70,7 @@ class MicroscopeClient:
     def connect(self) -> None:
         """Connect to the AutoScript server.
 
-        Deliberately does NOT catch — exceptions propagate to the caller
+        Deliberately does not catch — exceptions propagate to the caller
         (the controller's connect worker), which is the single logging
         point for connection failures.
         """
@@ -108,13 +111,17 @@ class MicroscopeClient:
 
 
 def create_client():
-    """Default client factory: real AutoScript, or simulated via env switch.
+    """Default client factory: real AutoScript, or simulated via a switch.
 
     Returns a ``MicroscopeClient``, or a ``SimulatedMicroscopeClient`` when
-    ``ASV_SIMULATED_MICROSCOPE=1`` (with small artificial connect/move
-    delays so the UI's transitional states stay visible offline).
+    ``ASV_SIMULATED_MICROSCOPE=1`` or ``alignment_config.
+    DEV_FORCE_SIMULATION`` is True (with small artificial connect/move
+    delays so the UI's transitional states stay visible offline). The dev
+    toggle is read at call time (module attribute, not an import-time
+    copy), so a monkeypatched value takes effect.
     """
-    if os.environ.get(ASV_SIM_ENV) == "1":
+    if os.environ.get(ASV_SIM_ENV) == "1" \
+            or alignment_config.DEV_FORCE_SIMULATION:
         from asv_spin_mill_angle_calc.simulated_microscope import (
             SimulatedMicroscopeClient,
         )
@@ -122,7 +129,12 @@ def create_client():
             frames_dir=os.environ.get(ASV_SIM_FRAMES_ENV) or None)
         client.state.connect_delay_s = 0.5
         client.state.move_delay_s = 0.2
-        logger.info("%s=1 — using the SIMULATED microscope client",
-                    ASV_SIM_ENV)
+        if alignment_config.DEV_FORCE_SIMULATION:
+            logger.warning(
+                "alignment_config.DEV_FORCE_SIMULATION is set — using the "
+                "simulated microscope client")
+        else:
+            logger.info("%s=1 — using the simulated microscope client",
+                        ASV_SIM_ENV)
         return client
     return MicroscopeClient()

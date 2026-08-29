@@ -18,13 +18,13 @@ using the application's own forward model:
 
 The same simulator (with zero delays) is the pytest integration fixture.
 An optional ``frames_dir`` replaces the renderer with an open-loop replay
-of real capture PNGs (e.g. the Spin-mill_Development logs) for detector
-realism; the closed loops cannot converge in that mode.
+of real capture PNGs (e.g. debug-frame captures from instrument runs)
+for detector realism; the closed loops cannot converge in that mode.
 
-Axis conventions are the application's assumed defaults (identity signs);
-real instruments may flip them, which is what the alignment config's sign
-constants are for — the simulator ships the convention the defaults
-assume, and hardware shakedown tunes only the config.
+Axis conventions are the identity signs (all +1); real instruments may
+flip them, which is what the alignment config's sign constants are for.
+Where a shipped config default is instrument-proven -1, simulator-backed
+tests pass +1 for that sign explicitly.
 """
 from __future__ import annotations
 
@@ -47,6 +47,7 @@ from asv_spin_mill_angle_calc.microscope_ops import (
 )
 from asv_spin_mill_angle_calc.spin_mill_geometry import (
     FIB_ANGLE_FROM_STAGE_PLANE_DEG,
+    fold_scan_rotation_deg,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,8 +190,8 @@ class SimulatedFibImagingOps:
             if self._replay_paths:
                 path = self._replay_paths[
                     (st.frame_counter - 1) % len(self._replay_paths)]
-                # UNCHANGED keeps 16-bit depth (debug captures are
-                # native-dtype PNGs); collapse color scans to gray.
+                # IMREAD_UNCHANGED keeps 16-bit depth (debug captures
+                # are native-dtype PNGs); collapse color scans to gray.
                 data = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
                 if data.ndim == 3:
                     data = cv2.cvtColor(data, cv2.COLOR_BGR2GRAY)
@@ -217,17 +218,35 @@ class SimulatedFibImagingOps:
             milling_angle_deg = (st.t_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
                                  + st.fiducial_plane_tilt_offset_deg)
             if milling_angle_deg > st.ring_visible_above_angle_deg:
-                offset_x_m = st.fiducial_x_m - st.x_m - st.beam_shift_x_m
-                offset_y_m = st.fiducial_y_m - st.y_m - st.beam_shift_y_m
+                # Stage and beam shift move the ellipse in different
+                # planes, so they are projected differently. The stage
+                # moves in the specimen plane, which this grazing view
+                # foreshortens along Y by sin(milling angle) — the very
+                # same projection that squashes the circular AOI into an
+                # ellipse of ratio sin(milling angle) below. Beam shift
+                # acts in the beam's own plane and is not foreshortened.
+                # (Hardware confirms both: stage-Y moves produced ~0
+                # image displacement while beam-shift moves of the same
+                # size landed at 81-94%.)
+                foreshortening = math.sin(math.radians(milling_angle_deg))
+                offset_p_m = ((st.fiducial_x_m - st.x_m)
+                              - st.beam_shift_x_m)
+                offset_q_m = ((st.fiducial_y_m - st.y_m) * foreshortening
+                              - st.beam_shift_y_m)
                 image_dx_m, image_dy_m = _rotate_deg(
-                    offset_x_m, offset_y_m, st.scan_rotation_deg)
+                    offset_p_m, offset_q_m, st.scan_rotation_deg)
                 center = (int(round(width / 2 + image_dx_m / pixel_size_m)),
                           int(round(height / 2 + image_dy_m / pixel_size_m)))
                 semi_major_px = (st.fiducial_diameter_m / 2.0) / pixel_size_m
                 semi_minor_px = semi_major_px * math.sin(
                     math.radians(milling_angle_deg))
-                ellipse_rotation_deg = (st.fiducial_plane_rotation_deg
-                                        - st.scan_rotation_deg)
+                # Folded into (-90, 90]: the ellipse's image orientation
+                # is a line orientation, so rotating the raster by 180
+                # deg maps it onto itself. The instrument's ASV baseline
+                # is 180 deg and its rings image at ~0 deg of tilt,
+                # not 180.
+                ellipse_rotation_deg = fold_scan_rotation_deg(
+                    st.fiducial_plane_rotation_deg - st.scan_rotation_deg)
                 cv2.ellipse(image, center,
                             (int(round(semi_major_px)),
                              max(1, int(round(semi_minor_px)))),
@@ -321,13 +340,13 @@ class SimulatedMicroscopeClient:
         if self.state.connect_delay_s:
             time.sleep(self.state.connect_delay_s)
         self._connected = True
-        logger.info("Connected to SIMULATED microscope")
+        logger.info("Connected to simulated microscope")
 
     def disconnect(self) -> None:
         if not self._connected:
             return
         self._connected = False
-        logger.info("Disconnected from SIMULATED microscope")
+        logger.info("Disconnected from simulated microscope")
 
     def ops(self) -> MicroscopeOps:
         if not self._connected:

@@ -4,8 +4,8 @@ This module is deliberately dependency-free (only the standard-library
 ``math``) so it can be imported by *both* consumers of the same geometry:
 
 * the FIB Angle Calculator page's controller (manual calculation), and
-* the upcoming semi-automated Position Alignment page, whose ellipse finder
-  and AutoScript stage-tilt loop run in Python and need the identical,
+* the semi-automated Position Alignment page, whose ellipse finder and
+  AutoScript stage-tilt loop run in Python and need the identical,
   unit-tested functions.
 
 Derivation (confirmed with the domain expert)
@@ -96,3 +96,30 @@ def ellipse_height_for_angle_um(diameter_um: float, angle_deg: float) -> float:
     an expected angle. Exact inverse of :func:`calculated_milling_angle_deg`.
     """
     return diameter_um * math.sin(math.radians(angle_deg))
+
+
+def fold_scan_rotation_deg(deg: float) -> float:
+    """FIB scan rotation folded into (-90, 90] deg.
+
+    The milled ellipse's image orientation is a line orientation — it is
+    pi-periodic, so a 180 deg raster rotation maps the ellipse onto
+    itself. An instrument whose session baseline scan rotation is 180 deg
+    (as on the Hydra Bio UX) is therefore at the same physical
+    orientation as 0 deg, and every consumer of scan rotation as an
+    *orientation* (the SEM geometry sinusoid, the detector's tilt prior)
+    must fold before using it.
+    The -90 edge canonicalizes to +90 so the interval stays half-open.
+    """
+    folded = (deg + 90.0) % 180.0 - 90.0
+    if folded == -90.0:
+        folded = 90.0
+    return folded
+
+
+def fold_scan_rotation_rad(rad: float) -> float:
+    """Radian twin of :func:`fold_scan_rotation_deg`: (-pi/2, pi/2]."""
+    half_pi = math.pi / 2.0
+    folded = (rad + half_pi) % math.pi - half_pi
+    if folded == -half_pi:
+        folded = half_pi
+    return folded

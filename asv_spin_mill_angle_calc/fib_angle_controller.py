@@ -5,10 +5,10 @@ QML writes the three inputs (writable properties) and binds the two result
 labels to the computed output properties; every value change re-evaluates the
 bindings via the single ``changed`` notify signal.
 
-Idioms mirror the sibling Hydra_Bio_Cryo_Utilities_3.0 controllers: functional
-``Signal`` class attribute, ``@Property`` getters/setters where each setter is a
-no-op when the value is unchanged (breaking the QML->Python->QML echo loop),
-``camelCase`` for the QML surface, ``_snake_case`` backing fields.
+Controller idioms used throughout the app: functional ``Signal`` class
+attribute, ``@Property`` getters/setters where each setter is a no-op when the
+value is unchanged (breaking the QML->Python->QML echo loop), ``camelCase``
+for the QML surface, ``_snake_case`` backing fields.
 """
 from __future__ import annotations
 

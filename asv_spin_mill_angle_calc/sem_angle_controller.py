@@ -3,7 +3,7 @@
 Thin Qt orchestration over the Qt-free modules: image_metadata (parse),
 sem_geometry_calculator (math), sem_geometry_result_formatter (strings).
 Caches the parsed records so changing the target milling angle recomputes
-without re-reading files (2.3 never recomputed on target change).
+without re-reading files.
 
 Idioms mirror the sibling FibAngleController: functional ``Signal`` class
 attribute, ``@Property`` getters/setters with no-op-on-equal setters,
@@ -28,6 +28,7 @@ from asv_spin_mill_angle_calc import image_metadata
 from asv_spin_mill_angle_calc import sem_geometry_result_formatter as formatter
 from asv_spin_mill_angle_calc.image_metadata import SpinMillImageMetadata
 from asv_spin_mill_angle_calc.sem_geometry_calculator import (
+    MIN_POSITIONS,
     SEMGeometryCalculator,
     SEMGeometryInputs,
     SEMGeometryStatus,
@@ -61,8 +62,8 @@ class SemAngleController(QObject):
     # change refreshes all output bindings (models notify themselves).
     changed = Signal()
 
-    # Transient status messages for the StatusBar (Hydra pattern:
-    # Connections in main.qml routes these to statusBar.showMessage).
+    # Transient status messages for the StatusBar (Connections in
+    # main.qml routes these to statusBar.showMessage).
     statusUpdated = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -101,8 +102,7 @@ class SemAngleController(QObject):
             return
         self._target_milling_angle = value
         if self._records or self._parse_errors:
-            # Recompute from the cached parse — no file I/O (2.3 never
-            # refreshed its results when the target angle changed).
+            # Recompute from the cached parse — no file I/O.
             # announce=False: spin-box sweeps would otherwise fire a log
             # block and a status toast per 0.1-degree tick.
             self._recompute(announce=False)
@@ -142,8 +142,9 @@ class SemAngleController(QObject):
         # Composed once: the console line and the Results card header are the
         # same string, so they can never drift apart.
         self._last_load_summary = (
-            f"Loaded {len(self._records)} of {len(paths)} "
-            f"spin mill image(s) from {self._last_directory}")
+            f"Loaded {len(self._records)} of {len(paths)} spin mill "
+            f"image{'s' if len(paths) != 1 else ''} from "
+            f"{self._last_directory}")
         logger.info("%s", self._last_load_summary)
         self._recompute()
 
@@ -175,9 +176,9 @@ class SemAngleController(QObject):
         result = self._calculator.calculate(inputs)
 
         rows: List[SemPositionCandidate] = []
-        # Fitted candidates only on OK — 2.3's contract: an AMBIGUOUS
-        # fit's numbers are diagnostics for the log, never UI rows the
-        # user might drive the stage to.
+        # Fitted candidates only on OK: an AMBIGUOUS fit's numbers are
+        # diagnostics for the log, never UI rows the user might drive
+        # the stage to.
         if result.status == SEMGeometryStatus.OK:
             rows.append(SemPositionCandidate(
                 SOURCE_CALCULATED,
@@ -210,12 +211,13 @@ class SemAngleController(QObject):
 
         The bar elides, so it carries only the outcome plus a count of any
         files that failed to parse. Per-file reasons and fit warnings are
-        the Results card's job. Insufficient data is phrased to match the
-        Position Alignment page's table placeholder rather than the
-        calculator's own (longer) status_message, which the card still shows.
+        the Results card's job. Insufficient data stays terse here — the
+        caveat that a measured (already-perpendicular) position can list
+        before the minimum is reached belongs on the card, which has room
+        for it; the count itself is derived so it tracks the calculator.
         """
         if result.status == SEMGeometryStatus.INSUFFICIENT_DATA:
-            message = "3 or more positions required."
+            message = f"{MIN_POSITIONS} or more positions required."
         else:
             message = formatter.status_line(result)
         if self._parse_errors:
@@ -233,7 +235,10 @@ class SemAngleController(QObject):
         if self._last_load_summary:
             sections.append(self._last_load_summary)
         if self._parse_errors:
-            lines = [f"{len(self._parse_errors)} file(s) could not be parsed:"]
+            lines = [
+                f"{len(self._parse_errors)} file"
+                f"{'s' if len(self._parse_errors) != 1 else ''} "
+                f"could not be parsed:"]
             lines += [f"  - {error}" for error in self._parse_errors]
             sections.append("\n".join(lines))
         sections.append(formatter.log_block(result))

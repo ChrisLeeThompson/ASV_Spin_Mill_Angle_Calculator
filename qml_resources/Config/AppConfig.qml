@@ -15,13 +15,16 @@ QtObject {
 
     // Main window
     readonly property int mainWindowWidth: 1200
-    readonly property int mainWindowHeight: 960
+    readonly property int mainWindowHeight: 1028
     readonly property int mainWindowMinimumWidth: 750
     readonly property int mainWindowMinimumHeight: 550
 
-    // Application icon / asset paths
-    readonly property url catbugWaitingIcon: "../assets/catbug_waiting_color.svg"
-    readonly property url iconWarning: "../assets/warning.svg"
+    // Asset paths
+    // Square-padded so rotating the wrapping Item about its center is
+    // stable (rotated 90 deg for a down chevron). Its path fill is
+    // already #ffffff = universalForeground, so no color overlay is
+    // needed here.
+    readonly property url iconChevronRight: "../assets/chevron-right-square.svg"
 
     // Tooltip durations
     readonly property int toolTipDelayMs: 1500
@@ -57,6 +60,10 @@ QtObject {
     readonly property color activityCompleteColor: "#33ff33"
     readonly property color activityRunningColor: "#2ea2ec"
     readonly property color activityExceptionColor: "#ffc633"
+    // Position Alignment "updated" state: the review capture was re-taken
+    // by hand (Update button) — accent blue, deliberately not the green
+    // reserved for a routine-verified alignment.
+    readonly property color activityUpdatedColor: universalAccent
 
     // Container colors
     readonly property color containerBackground: "#263640"
@@ -105,7 +112,7 @@ QtObject {
     // Position results table
     readonly property int tableCellFontSize: 14
     readonly property int tableRowHeight: 28
-    // Per-column widths, sized to the wider of the bold header text and the
+    // Per-column widths, sized to the wider of the header text and the
     // widest expected value at tableCellFontSize (units live in the headers,
     // so long headers like "Scan R (deg)" are usually the binding constraint).
     readonly property int tableIndexColumnWidth: 28    // "12" centered
@@ -114,10 +121,18 @@ QtObject {
     readonly property int tableBeamColumnWidth: 92     // "Beam X (µm)"
     readonly property int tableScanRColumnWidth: 96    // "Scan R (deg)"
     readonly property int tableWdColumnWidth: 72       // "WD (mm)" / "10.254"
+    readonly property int tableMillingAngleColumnWidth: 140  // "Milling Angle (deg)"
+    // Row-action chevron column, ahead of the index column. Sized to the
+    // chevron glyph plus its hit area — deliberately narrow so it costs
+    // the already-scrolling Position Alignment table as little as possible.
+    readonly property int tableActionColumnWidth: 24
+    readonly property int tableActionIconSize: 12
     readonly property int tableColumnSpacing: 12
     readonly property int tableCellRightPadding: 12
     readonly property int tableHeaderSeparatorWidth: 2
     readonly property int tableRowSeparatorWidth: 1
+    // Pending and deactivated slot rows in the Position Alignment table.
+    readonly property real tableInactiveRowOpacity: 0.45
     readonly property int tableHeight: 180
 
     // SEM angle calc page — table extensions
@@ -130,6 +145,10 @@ QtObject {
     // Wide enough that a measured row's timestamp prefix (the part that
     // distinguishes the capture) survives the elide; tooltip has the rest.
     readonly property int tableSourceColumnWidth: 260
+    // Narrow variant for the Position Alignment page's 400 px card, whose
+    // provenance details are short ("Position 2") — keeps the R/T columns
+    // on-screen without horizontal scroll.
+    readonly property int tableSourceColumnWidthNarrow: 150
     // (Table heights are declared at the call sites, in rows — see
     // preferredRows on the SEM page's two tables.)
     // Results card floor. StatusLogView has no natural height (implicit 0 by

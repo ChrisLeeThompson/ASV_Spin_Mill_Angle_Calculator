@@ -136,9 +136,9 @@ Item {
                         Layout.preferredWidth: fibMillingAngleCalcCard.spinBoxColumnWidth
                         decimals: 1
                         floatFrom: 0.1
-                        // Dynamic clamp (2.3 behavior): keep the measured
-                        // height below the diameter so the asin ratio stays
-                        // < 1. Shrinking the diameter re-clamps this box.
+                        // Dynamic clamp: keep the measured height below the
+                        // diameter so the asin ratio stays < 1. Shrinking
+                        // the diameter re-clamps this box.
                         floatTo: Math.max(measuredEllipseHeightSB.floatFrom, aoiDiameterSB.value - 0.1)
                         floatStep: 0.1
                         floatValue: 55.8

@@ -1,43 +1,43 @@
 """The Position Alignment automation sequence (Qt-free).
 
-One :class:`AlignmentSequence` instance runs ONE position's alignment,
+One :class:`AlignmentSequence` instance runs one position's alignment,
 driven entirely through the :mod:`microscope_ops` Protocols so the same
 logic runs against real AutoScript, the simulator, or plain test fakes.
 
-Flow (see .claude/position_alignment_design.md for the requirements):
+Flow:
 
-1.  CHECKS   — target angle window, beam on (refuse) / blanked (auto
+1.  Checks   — target angle window, beam on (refuse) / blanked (auto
     unblank), tilt limits, Specimen coordinate system.
-2.  SETUP    — FIB into the active view; snapshot the operator's scan
+2.  Setup    — FIB into the active view; snapshot the operator's scan
     conditions (the run images with whatever ASV set up). Beam-shift
     runs start from a zeroed beam shift: the trim adds to the current
     value, so a shift inherited from a previous run would bias the
     alignment and accumulate toward the clamp limits.
-3.  SEARCH   — detect at the current tilt (ASV already tilted to the
+3.  Search   — detect at the current tilt (ASV already tilted to the
     milling angle); if not found, walk tilt toward 0 in small steps
     (a fatter ellipse is easier to detect; never more negative),
     capped at the detector's angle ceiling. The sample-planarity
-    anchor requires TWO consistent fits (same center and width,
-    angles tracking stage tilt 1:1) — one clutter fit can no longer
-    poison the run — and once confirmed, the MEASURED ring width
+    anchor requires two consistent fits (same center and width,
+    angles tracking stage tilt 1:1), so one clutter fit cannot
+    poison the run; once confirmed, the measured ring width
     becomes the working width (mismatch with the entered AOI is an
     operator advisory, not a rejection). A failed sweep gets one
     auto-C/B + HFW-escalation rescue and a second sweep; both failing
     is NOT_FOUND.
-4.  CONVERGE — center (stage x/y), level (FIB scan rotation until the
-    ellipse is horizontal; once the ring has been SEEN level, later
+4.  Converge — center (stage x/y), level (FIB scan rotation until the
+    ellipse is horizontal; once the ring has been seen level, later
     larger tilt readings are noise and leveling stays off), walk tilt
     to the target and close the loop on the measured angle
     (correcting sample planarity), re-center, and optionally trim
     with ion-beam shift. Losing detection mid-run triggers a bounded
     in-place re-anchor (fresh 2-frame lock at the wide window) before
     giving up.
-5.  RESTORE  — walk HFW back if the search escalated it. Scan rotation
-    is deliberately NOT restored: it is the product ASV logs.
-6.  VERIFY   — verify_frames fresh frames (default 3): centering and
-    level inside tolerance on EVERY frame, the angle verdict on the
-    round's MEDIAN angle (a single noisy minor-axis fit cannot decide
-    the round); a failure re-enters CONVERGE once.
+5.  Restore  — walk HFW back if the search escalated it. Scan rotation
+    is deliberately not restored: it is the product ASV logs.
+6.  Verify   — verify_frames fresh frames (default 3): centering and
+    level inside tolerance on every frame, the angle verdict on the
+    round's median angle (a single noisy minor-axis fit cannot decide
+    the round); a failure re-enters Converge once.
 
 Safety posture: ``run()`` never raises; every hardware call is preceded
 by a cooperative stop check (SDK calls block and cannot be interrupted —
@@ -76,6 +76,7 @@ from asv_spin_mill_angle_calc.ellipse_detector import (
 from asv_spin_mill_angle_calc.microscope_ops import FibFrame, MicroscopeOps
 from asv_spin_mill_angle_calc.spin_mill_geometry import (
     FIB_ANGLE_FROM_STAGE_PLANE_DEG,
+    fold_scan_rotation_deg,
     stage_tilt_for_milling_angle_deg,
 )
 
@@ -87,13 +88,58 @@ logger = logging.getLogger(__name__)
 ASV_DEBUG_ENV = "ASV_DEBUG_FRAMES_DIR"
 
 # Headroom for the ring's intrinsic in-plane rotation when bounding the
-# detector's tilt search (measured +0.14 deg on the 2026-08 corpus; the
-# bound additionally grows with the applied scan rotation).
+# detector's tilt search (measured at about +0.14 deg on real captures;
+# the bound additionally grows with the applied scan rotation).
 _INTRINSIC_RING_TILT_HEADROOM_DEG = 2.0
 
 # on_frame callback: (image, fit or None, pixel_size_m) per grabbed frame.
 FrameCallback = Callable[[np.ndarray, Optional[EllipseFit], float], None]
 StatusCallback = Callable[[str], None]
+
+
+def expected_geometry_for(cfg: AlignmentConfig, *,
+                          aoi_diameter_um: float,
+                          pixel_size_m: float,
+                          angle_window_deg: Tuple[float, float],
+                          scan_rotation_deg: float,
+                          ) -> Optional[ExpectedGeometry]:
+    """Physical-model priors for the detector (pure; no instrument I/O).
+
+    The AOI diameter pins the semi-major axis (tilt-invariant); the
+    acceptance angle window pins the axis-ratio band, excluding
+    degenerate flat hypotheses inside RANSAC so the true ring wins the
+    fit. ``None`` when the AOI or pixel size is unknown
+    (checks-disabled mode).
+
+    ``scan_rotation_deg`` is folded into (-90, 90] before it bounds the
+    vote's tilt search: the ring's image tilt tracks the applied scan
+    rotation 1:1, but as a line orientation — a 180 deg raster rotation
+    leaves the ellipse's image tilt unchanged. Without the fold, a
+    session baseline of 180 deg produces a 182 deg bound that the
+    detector clamps to its 12 deg ceiling, searching 25 tilt
+    hypotheses per minor axis instead of 5 (~5x the runtime, and it
+    admits tilted clutter the prior exists to exclude).
+
+    Shared by :class:`AlignmentSequence` and the Update button's
+    single-frame capture, so both measure against identical priors.
+    """
+    if aoi_diameter_um <= 0 or pixel_size_m <= 0:
+        return None
+    semi_major_px = (aoi_diameter_um * 1e-6 / 2.0) / pixel_size_m
+    low_deg, high_deg = angle_window_deg
+    detector_cfg = cfg.detector
+    ratio_low = max(math.sin(math.radians(max(low_deg, 0.5))),
+                    detector_cfg.min_axis_ratio)
+    ratio_high = min(math.sin(math.radians(min(high_deg, 20.0))),
+                     detector_cfg.max_axis_ratio)
+    if ratio_high <= ratio_low:
+        ratio_low = detector_cfg.min_axis_ratio
+        ratio_high = detector_cfg.max_axis_ratio
+    max_abs_tilt_deg = (_INTRINSIC_RING_TILT_HEADROOM_DEG
+                        + abs(fold_scan_rotation_deg(scan_rotation_deg)))
+    return ExpectedGeometry(semi_major_px=semi_major_px,
+                            axis_ratio=(ratio_low, ratio_high),
+                            max_abs_tilt_deg=max_abs_tilt_deg)
 
 
 class AlignmentOutcome(str, Enum):
@@ -175,13 +221,12 @@ class _AnchorObservation:
 class _PlanarityAnchor:
     """Two-frame-verified sample-planarity anchor.
 
-    Run 1 of the 2026-08 hardware test died from anchor poisoning: ONE
-    unverified clutter fit anchored the offset at -2.97 deg and the
-    tracking window then excluded the true ring for the rest of the
-    run. The anchor now requires two consistent observations: same
-    center, same semi-major axis, and measured angles moving 1:1 with
-    stage tilt (a static clutter structure across a 1 deg sweep step
-    shows slope 0 and fails the third check).
+    The anchor requires two consistent observations — same center,
+    same semi-major axis, and measured angles moving 1:1 with stage
+    tilt — so a single unverified clutter fit cannot anchor a wrong
+    offset and let the tracking window exclude the true ring for the
+    rest of the run. A static clutter structure across a 1 deg sweep
+    step shows slope 0 and fails the third check.
     """
 
     def __init__(self, center_tolerance_px: float,
@@ -231,6 +276,18 @@ class _PlanarityAnchor:
             (b.fit.milling_angle_deg - a.fit.milling_angle_deg)
             - (b.tilt_deg - a.tilt_deg))
         return slope_residual_deg <= self._angle_tolerance_deg
+
+
+@dataclass(frozen=True)
+class _GateRejection:
+    """One gate verdict for a rejected fit.
+
+    ``width_um`` is populated only when the rejection came from the
+    pre-anchor AOI width gate — it feeds the wrong-entry advisory, which
+    must never trigger on post-anchor width drift or any other gate.
+    """
+    reason: str
+    width_um: Optional[float] = None
 
 
 class _SignProbe:
@@ -289,7 +346,7 @@ class AlignmentSequence:
         self._frames = 0
         self._tilt_moves = 0
         self._center_moves = 0
-        # Sample-planarity offset (measured - model), anchored once TWO
+        # Sample-planarity offset (measured - model), anchored once two
         # consistent observations confirm the lock.
         self._anchor = _PlanarityAnchor(
             config.anchor_center_tolerance_px,
@@ -300,10 +357,17 @@ class AlignmentSequence:
         # anchor confirms, the measured width afterwards (user
         # decision: report mismatches instead of rejecting the run).
         self._working_aoi_diameter_um = params.aoi_diameter_um
-        # Leveling latch: once the ring has been SEEN level, later
+        # Leveling latch: once the ring has been seen level, later
         # larger tilt readings are noise, never "corrected".
         self._level_established = False
         self._warnings: list = []
+        # Wrong-AOI-entry advisory state: consecutive pre-anchor
+        # width-gate rejection widths (cleared by any acceptance or any
+        # other rejection kind), plus once-per-run flags for the two
+        # advisory tiers.
+        self._width_gate_streak_um: list = []
+        self._width_gate_notice_sent = False
+        self._aoi_entry_advisory_sent = False
         # Debug frame capture (env override beats the config field)
         debug_dir = os.environ.get(ASV_DEBUG_ENV) or config.debug_frames_dir
         self._debug_dir: Optional[Path] = Path(debug_dir) if debug_dir \
@@ -382,7 +446,7 @@ class AlignmentSequence:
                         round_index, detail)
             round_index += 1
         raise _NotConverged(
-            f"Alignment did not verify ({detail}) — see console log")
+            f"Alignment did not verify — {detail} (see console log)")
 
     def _checks(self, target_deg: float) -> None:
         self._phase("Pre-checks", "Checking microscope state...")
@@ -482,7 +546,7 @@ class AlignmentSequence:
 
     def _sweep_once(self, start_tilt_deg: float,
                     sweep: int) -> Optional[EllipseFit]:
-        """One tilt-toward-0 sweep; returns an ANCHOR-CONFIRMED fit or
+        """One tilt-toward-0 sweep; returns an anchor-confirmed fit or
         None. A single accepted fit only records an anchor candidate;
         up to two same-tilt confirmation grabs (no stage motion) try to
         confirm it immediately, and otherwise the candidate rides along
@@ -601,29 +665,105 @@ class AlignmentSequence:
                      label: str) -> EllipseFit:
         cfg = self._cfg
         self._phase(label, f"{label} the AOI ellipse...")
-        probe_x = _SignProbe(f"{label} (x)", cfg.stage_sign_x)
-        probe_y = _SignProbe(f"{label} (y)", cfg.stage_sign_y)
+        return self._recenter_loop(
+            fit, tolerance_m, label, cfg.center_max_iterations,
+            _SignProbe(f"{label} (x)", cfg.stage_sign_x),
+            _SignProbe(f"{label} (y)", cfg.stage_sign_y),
+            self._actuate_stage)
+
+    def _recenter_loop(self, fit: EllipseFit, tolerance_m: float,
+                       label: str, max_iterations: int,
+                       probe_x: _SignProbe, probe_y: _SignProbe,
+                       actuate) -> EllipseFit:
+        """Shared centering loop: measure the image offset, de-rotate it
+        into the beam plane, hand the correction to ``actuate``, and
+        re-measure.
+
+        ``actuate(p_m, q_m, sign_x, sign_y)`` owns the plane its
+        correction lives in — the stage actuator de-projects the
+        perpendicular component (specimen plane), the beam-shift
+        actuator does not (beam plane). Keeping that in the actuator
+        rather than in a flag here is what stops the two from being
+        confused: they are physically different moves.
+        """
+        # 3 px of slack: above the measured ~1.4 px peak-to-peak
+        # within-run center scatter, so a noise wiggle cannot flip a
+        # probe.
+        slack_m = max(3.0 * self._last_pixel_size_m, 0.5e-6)
         previous: Optional[Tuple[float, float]] = None
-        slack_m = max(2.0 * self._last_pixel_size_m, 0.5e-6)
-        for _ in range(cfg.center_max_iterations):
+        for _ in range(max_iterations):
             offset_x_m, offset_y_m = self._offset_m(fit)
-            if math.hypot(offset_x_m, offset_y_m) <= tolerance_m:
+            if self._centered(offset_x_m, offset_y_m, tolerance_m):
                 return fit
+            if not self._offset_plausible(offset_x_m, offset_y_m, label):
+                # Treated as a failed detection, never as a move: a fit
+                # this far off-center is far likelier to be clutter than
+                # a real excursion, and the de-projected Y move would be
+                # large. Re-measure through the recovery ladder instead.
+                fit = self._measure_required()
+                continue
             if previous is not None:
                 probe_x.check(abs(previous[0]), abs(offset_x_m), slack_m)
                 probe_y.check(abs(previous[1]), abs(offset_y_m), slack_m)
-            world_x_m, world_y_m = self._image_to_world(
-                offset_x_m, offset_y_m)
-            self._status(
-                f"{label}: moving stage by ({world_x_m * 1e6:+.1f}, "
-                f"{world_y_m * 1e6:+.1f}) µm...")
-            self._stage_move_xy(probe_x.sign * world_x_m,
-                                probe_y.sign * world_y_m)
+            p_m, q_m = self._image_to_beam_plane(offset_x_m, offset_y_m)
+            actuate(p_m, q_m, probe_x.sign, probe_y.sign)
             previous = (offset_x_m, offset_y_m)
             fit = self._measure_required()
+        # Validate the last move's result: without this check the final
+        # iteration's move would go unchecked and the loop could raise
+        # even when that move succeeded.
+        offset_x_m, offset_y_m = self._offset_m(fit)
+        if self._centered(offset_x_m, offset_y_m, tolerance_m):
+            return fit
         raise _NotConverged(
-            f"{label} did not converge within "
-            f"{cfg.center_max_iterations} moves")
+            f"{label} did not converge within {max_iterations} moves "
+            f"(residual {offset_x_m * 1e6:+.1f}, {offset_y_m * 1e6:+.1f} µm)")
+
+    def _actuate_stage(self, p_m: float, q_m: float,
+                       sign_x: float, sign_y: float) -> None:
+        """Move the stage to null a beam-plane offset (de-projected)."""
+        dx_m, dy_m = self._stage_move_for_offset(sign_x * p_m, sign_y * q_m)
+        self._status(f"Centering: moving stage by ({dx_m * 1e6:+.1f}, "
+                     f"{dy_m * 1e6:+.1f}) µm...")
+        self._stage_move_xy(dx_m, dy_m)
+
+    def _actuate_beam_shift(self, p_m: float, q_m: float,
+                            sign_x: float, sign_y: float) -> None:
+        """Trim the ion beam shift to null a beam-plane offset.
+
+        Beam shift acts in the beam's own plane, so it is not
+        foreshortened and gets no de-projection — measured trims moved
+        the ellipse by 81-94% of the commanded distance (only the Y
+        direction was inverted, hence ``beam_shift_sign_y = -1``),
+        while stage-Y moves of the same arithmetic produced ~0 image
+        displacement.
+        """
+        current_x_m, current_y_m = self._ops.ion_beam.beam_shift_m()
+        requested_x_m, requested_y_m = sign_x * p_m, sign_y * q_m
+        (x_lo, x_hi), (y_lo, y_hi) = self._beam_limits_m()
+        clamped_x_m = min(max(current_x_m + requested_x_m, x_lo), x_hi)
+        clamped_y_m = min(max(current_y_m + requested_y_m, y_lo), y_hi)
+        self._status(
+            f"Beam-shift trim: shifting by "
+            f"({(clamped_x_m - current_x_m) * 1e6:+.2f}, "
+            f"{(clamped_y_m - current_y_m) * 1e6:+.2f}) µm...")
+        self._write_beam_shift(clamped_x_m, clamped_y_m)
+        # Whatever the clamp refused, expressed back in the unsigned
+        # beam-plane frame, is handed to the stage. Working in
+        # applied-fractions keeps this sign-agnostic instead of dividing
+        # by a sign (which also mixed the probe-corrected beam sign with
+        # the un-probed stage sign).
+        spill_p_m = p_m * (1.0 - _applied_fraction(
+            requested_x_m, clamped_x_m - current_x_m))
+        spill_q_m = q_m * (1.0 - _applied_fraction(
+            requested_y_m, clamped_y_m - current_y_m))
+        if abs(spill_p_m) > 1e-9 or abs(spill_q_m) > 1e-9:
+            cfg = self._cfg
+            dx_m, dy_m = self._stage_move_for_offset(
+                cfg.stage_sign_x * spill_p_m, cfg.stage_sign_y * spill_q_m)
+            logger.info("Beam shift clamped to limits; spilling a "
+                        "(%.2f, %.2f) um stage move", dx_m * 1e6, dy_m * 1e6)
+            self._stage_move_xy(dx_m, dy_m)
 
     def _level_loop(self, fit: EllipseFit) -> EllipseFit:
         cfg = self._cfg
@@ -635,11 +775,11 @@ class AlignmentSequence:
         previous: Optional[float] = None
         for _ in range(cfg.level_max_iterations):
             if abs(fit.tilt_deg) <= cfg.level_noise_floor_deg:
-                # The ring has been SEEN level. Its plane rotation
+                # The ring has been seen level. Its plane rotation
                 # cannot change unless we rotate the scan, so leveling
                 # is done for this run: later larger readings are
                 # measurement noise, and "correcting" them injects
-                # real tilt (exactly what the 2026-08 run 1 did).
+                # real tilt.
                 self._level_established = True
                 logger.info(
                     "Ellipse is level (tilt %.2f deg ≤ %.2f noise "
@@ -647,6 +787,16 @@ class AlignmentSequence:
                     "run", fit.tilt_deg, cfg.level_noise_floor_deg)
                 return fit
             if abs(fit.tilt_deg) <= cfg.level_tolerance_deg:
+                # An in-tolerance reading latches too: the ring's plane
+                # rotation physically cannot change unless we rotate the
+                # scan, so "inside tolerance" means done — without the
+                # latch, a later noisy frame in a verify round could
+                # re-open leveling and inject real rotation.
+                self._level_established = True
+                logger.info(
+                    "Ellipse is level (tilt %.2f deg ≤ %.2f tolerance); "
+                    "scan-rotation leveling disabled for this run",
+                    fit.tilt_deg, cfg.level_tolerance_deg)
                 return fit
             probe.check(previous, abs(fit.tilt_deg), 0.1)
             delta_deg = _clamp(probe.sign * fit.tilt_deg,
@@ -671,7 +821,7 @@ class AlignmentSequence:
         model_tilt_deg = stage_tilt_for_milling_angle_deg(target_deg)
         # Open-loop walk in bounded steps, keeping the ellipse in view.
         # The exit epsilon must be at least the read-back tolerance:
-        # _tilt_absolute assigns the stage READ-BACK to self._tilt_deg,
+        # _tilt_absolute assigns the stage read-back to self._tilt_deg,
         # accepting up to tilt_readback_tolerance_deg of deviation — a
         # tighter epsilon re-commands the same tilt forever. The cap and
         # stall guard break to the closed loop, which owns convergence.
@@ -713,13 +863,19 @@ class AlignmentSequence:
                          f"(target {target_deg:.1f}°)")
             if abs(error_deg) <= cfg.tilt_tolerance_deg:
                 return fit
-            probe.check(previous, abs(error_deg), 0.05)
+            # Slack 0.10: 2x the tilt read-back tolerance and above the
+            # worst measured single-frame angle noise (0.09 deg), so
+            # the probe cannot flip on measurement scatter.
+            probe.check(previous, abs(error_deg), 0.10)
             delta_deg = _clamp(probe.sign * error_deg,
                                cfg.tilt_step_clamp_deg)
             self._status(f"Adjusting stage tilt by {delta_deg:+.2f}°...")
             self._tilt_absolute(self._tilt_deg + delta_deg)
             previous = abs(error_deg)
-            fit = self._measure_required()
+            # Median-of-N measurement: at a 0.10 deg tolerance a single
+            # fit's noise (0.03-0.09 deg) could flip the verdict, so
+            # each correcting iteration decides like verification does.
+            fit = self._measure_median(cfg.tilt_measure_frames)
             fit = self._keep_in_view(fit)
         raise _NotConverged(
             f"Tilt did not converge (last error "
@@ -728,44 +884,38 @@ class AlignmentSequence:
 
     def _keep_in_view(self, fit: EllipseFit) -> EllipseFit:
         """One recenter move when tilting walks the ellipse off-center
-        far enough to threaten the detector's centered-geometry priors."""
+        far enough to threaten the detector's centered-geometry priors.
+
+        Deliberately triggered on the combined offset: this asks "has the
+        ellipse drifted out of the detector's comfort zone", which is a
+        radial question — unlike convergence, which is per-axis."""
+        cfg = self._cfg
         offset_x_m, offset_y_m = self._offset_m(fit)
-        threshold_m = self._cfg.keep_in_view_frac * self._expected_hfw_m
+        threshold_m = cfg.keep_in_view_frac * self._expected_hfw_m
         if math.hypot(offset_x_m, offset_y_m) <= threshold_m:
             return fit
-        world_x_m, world_y_m = self._image_to_world(offset_x_m, offset_y_m)
+        p_m, q_m = self._image_to_beam_plane(offset_x_m, offset_y_m)
         self._status("Re-centering to keep the ellipse in view...")
-        self._stage_move_xy(self._cfg.stage_sign_x * world_x_m,
-                            self._cfg.stage_sign_y * world_y_m)
+        self._actuate_stage(p_m, q_m, cfg.stage_sign_x, cfg.stage_sign_y)
         return self._measure_required()
 
     def _beam_trim(self, fit: EllipseFit) -> EllipseFit:
+        """Fine-center with ion beam shift.
+
+        A bounded loop with sign probes rather than a single one-shot
+        write: an inverted sign could otherwise never self-correct (an
+        inverted Y sign has been observed on hardware). The extra
+        iteration normally exits at the tolerance check without moving
+        (measured trims converge in one step)."""
         cfg = self._cfg
         self._phase("Beam-shift trim",
                     "Fine-centering with ion beam shift...")
-        tolerance_m = self._beam_tolerance_m()
-        offset_x_m, offset_y_m = self._offset_m(fit)
-        if math.hypot(offset_x_m, offset_y_m) <= tolerance_m:
-            return fit
-        world_x_m, world_y_m = self._image_to_world(offset_x_m, offset_y_m)
-        current_x_m, current_y_m = self._ops.ion_beam.beam_shift_m()
-        desired_x_m = current_x_m + cfg.beam_shift_sign_x * world_x_m
-        desired_y_m = current_y_m + cfg.beam_shift_sign_y * world_y_m
-        (x_lo, x_hi), (y_lo, y_hi) = self._beam_limits_m()
-        clamped_x_m = min(max(desired_x_m, x_lo), x_hi)
-        clamped_y_m = min(max(desired_y_m, y_lo), y_hi)
-        self._write_beam_shift(clamped_x_m, clamped_y_m)
-        spill_x_m = desired_x_m - clamped_x_m
-        spill_y_m = desired_y_m - clamped_y_m
-        if abs(spill_x_m) > 1e-9 or abs(spill_y_m) > 1e-9:
-            logger.info("Beam shift clamped to limits; spilling "
-                        "(%.2f, %.2f) um to a stage move",
-                        spill_x_m * 1e6, spill_y_m * 1e6)
-            self._stage_move_xy(cfg.stage_sign_x * spill_x_m
-                                / cfg.beam_shift_sign_x,
-                                cfg.stage_sign_y * spill_y_m
-                                / cfg.beam_shift_sign_y)
-        return self._measure_required()
+        return self._recenter_loop(
+            fit, self._beam_tolerance_m(), "Beam-shift trim",
+            cfg.beam_max_iterations,
+            _SignProbe("Beam-shift trim (x)", cfg.beam_shift_sign_x),
+            _SignProbe("Beam-shift trim (y)", cfg.beam_shift_sign_y),
+            self._actuate_beam_shift)
 
     def _beam_limits_m(self):
         try:
@@ -778,10 +928,9 @@ class AlignmentSequence:
 
     def _zero_beam_shift(self) -> None:
         """Beam-shift runs start from a neutral beam: the trim adds to
-        the CURRENT value, so a shift inherited from a previous run
+        the current value, so a shift inherited from a previous run
         both biases the alignment and walks the accumulated value into
-        the clamp limits (2026-08-13 corpus: run 074934's trim
-        persisted into every following run)."""
+        the clamp limits."""
         current_x_m, current_y_m = self._ops.ion_beam.beam_shift_m()
         if abs(current_x_m) <= 1e-9 and abs(current_y_m) <= 1e-9:
             return
@@ -810,21 +959,27 @@ class AlignmentSequence:
         fits = []
         for _ in range(cfg.verify_frames):
             fit = self._measure_required()
-            offset_m = math.hypot(*self._offset_m(fit))
-            if offset_m > tolerance_m:
+            offset_x_m, offset_y_m = self._offset_m(fit)
+            if not self._centered(offset_x_m, offset_y_m, tolerance_m):
+                # Name the axis: a Y-only failure is the signature of a
+                # de-projection or stage-sign problem, and a pooled
+                # number hides exactly that.
+                axis, value_m = (("Y", offset_y_m)
+                                 if abs(offset_y_m) > abs(offset_x_m)
+                                 else ("X", offset_x_m))
                 return (False, fit,
-                        f"off-center by {offset_m * 1e6:.1f} µm")
+                        f"off-center in {axis} by {value_m * 1e6:+.1f} µm")
             level_deg = abs(fit.tilt_deg)
             if level_deg > cfg.level_tolerance_deg:
                 return (False, fit,
                         f"ellipse tilted {level_deg:.2f}°")
             fits.append(fit)
-        # Centering and leveling are STATE — any single frame violating
+        # Centering and leveling are state — any single frame violating
         # them fails the round above. The angle verdict pools the
-        # round: the per-frame noise lives in the measured minor axis
-        # (2026-08-13 corpus), so the MEDIAN outvotes one noisy fit in
-        # either direction, and the reported fit is the median frame
-        # itself — an actual measurement, not a synthetic average.
+        # round: the per-frame noise lives in the measured minor axis,
+        # so the median outvotes one noisy fit in either direction, and
+        # the reported fit is the median frame itself — an actual
+        # measurement, not a synthetic average.
         fits.sort(key=lambda item: item.milling_angle_deg)
         median_fit = fits[len(fits) // 2]
         spread_deg = (fits[-1].milling_angle_deg
@@ -870,54 +1025,84 @@ class AlignmentSequence:
             self._on_frame(frame.data, None, frame.pixel_size_m)
             self._debug_frame(frame, None, "no_fit")
             return None
-        first_reason = None
+        first_rejection = None
         for fit in fits:
-            reason = self._gate_fit(fit)
-            if reason is None:
+            rejection = self._gate_fit(fit)
+            if rejection is None:
+                # An accepted fit ends any wrong-entry streak: the ring
+                # is findable against the entered diameter after all.
+                self._width_gate_streak_um.clear()
                 self._on_frame(frame.data, fit, frame.pixel_size_m)
                 self._debug_frame(frame, fit, "accepted")
                 return fit
-            if first_reason is None:
-                first_reason = reason
+            if first_rejection is None:
+                first_rejection = rejection
+        self._note_width_gate_rejection(first_rejection)
         self._on_frame(frame.data, fits[0], frame.pixel_size_m)
-        self._debug_frame(frame, fits[0], f"rejected: {first_reason}")
+        self._debug_frame(frame, fits[0],
+                          f"rejected: {first_rejection.reason}")
         return None
 
+    def _note_width_gate_rejection(self,
+                                   rejection: _GateRejection) -> None:
+        """Operator guidance for a wrong AOI diameter entry.
+
+        Two tiers: the first pre-anchor width rejection of a run puts
+        measured-vs-entered in the status line immediately (a bare
+        failure would hide the likely cause in the console log);
+        repeated consistent rejections escalate to a collected warning
+        naming the AOI Diameter entry. Non-width rejections break the
+        streak — inconsistent widths mean clutter, not a wrong entry.
+        """
+        cfg = self._cfg
+        width_um = rejection.width_um
+        if width_um is None:
+            self._width_gate_streak_um.clear()
+            return
+        entered_um = self._params.aoi_diameter_um
+        if not self._width_gate_notice_sent:
+            self._width_gate_notice_sent = True
+            self._status(
+                f"AOI width check: a fit measuring ≈{width_um:.0f} µm "
+                f"was rejected against the entered {entered_um:.0f} µm")
+        if (self._width_gate_streak_um
+                and abs(width_um - self._width_gate_streak_um[-1])
+                > cfg.aoi_advisory_consistency_frac
+                * self._width_gate_streak_um[-1]):
+            self._width_gate_streak_um.clear()
+        self._width_gate_streak_um.append(width_um)
+        if (not self._aoi_entry_advisory_sent
+                and len(self._width_gate_streak_um)
+                >= cfg.aoi_advisory_min_rejections):
+            self._aoi_entry_advisory_sent = True
+            streak = sorted(self._width_gate_streak_um)
+            median_um = streak[len(streak) // 2]
+            self._warn(
+                f"Fits measuring ≈{median_um:.0f} µm keep being "
+                f"rejected against the entered AOI diameter of "
+                f"{entered_um:.0f} µm — check the AOI Diameter entry "
+                "(the fit is biased toward the entered value, so the "
+                "true ring may differ even more)")
+
     def _expected_geometry(self) -> Optional[ExpectedGeometry]:
-        """Physical-model priors for the detector. The AOI diameter
-        pins the semi-major axis (tilt-invariant); the acceptance
-        angle window pins the axis-ratio band, excluding degenerate
-        flat hypotheses inside RANSAC so the true ring wins the fit.
-        None when the AOI is unknown (checks-disabled mode)."""
-        aoi_um = self._working_aoi_diameter_um
-        if aoi_um <= 0 or self._last_pixel_size_m <= 0:
-            return None
-        semi_major_px = (aoi_um * 1e-6 / 2.0) / self._last_pixel_size_m
-        low_deg, high_deg = self._angle_window_deg()
-        detector_cfg = self._cfg.detector
-        ratio_low = max(math.sin(math.radians(max(low_deg, 0.5))),
-                        detector_cfg.min_axis_ratio)
-        ratio_high = min(math.sin(math.radians(min(high_deg, 20.0))),
-                         detector_cfg.max_axis_ratio)
-        if ratio_high <= ratio_low:
-            ratio_low = detector_cfg.min_axis_ratio
-            ratio_high = detector_cfg.max_axis_ratio
-        # The ring's image tilt tracks the applied scan rotation 1:1
-        # (verified on the real corpus; tracking sign is instrument-
-        # dependent, so the bound is symmetric): intrinsic ring
-        # rotation headroom plus whatever rotation this run applied.
-        max_abs_tilt_deg = (_INTRINSIC_RING_TILT_HEADROOM_DEG
-                            + abs(self._ops.ion_beam.scan_rotation_deg()))
-        return ExpectedGeometry(semi_major_px=semi_major_px,
-                                axis_ratio=(ratio_low, ratio_high),
-                                max_abs_tilt_deg=max_abs_tilt_deg)
+        """This run's detector priors: the working ring width, the
+        current pixel size, the acceptance window, and the applied scan
+        rotation (see :func:`expected_geometry_for`)."""
+        return expected_geometry_for(
+            self._cfg,
+            aoi_diameter_um=self._working_aoi_diameter_um,
+            pixel_size_m=self._last_pixel_size_m,
+            angle_window_deg=self._angle_window_deg(),
+            scan_rotation_deg=self._ops.ion_beam.scan_rotation_deg(),
+        )
 
     def _angle_window_deg(self) -> Tuple[float, float]:
         """Acceptance window for the measured milling angle, shared by
         the detector prior and the plausibility gate so the two can
-        never disagree. Before FOUND: the wide search window around
-        the raw model (sample planarity unknown). After FOUND: a
-        tighter window around the planarity-anchored model."""
+        never disagree. Before the anchor confirms: the wide search
+        window around the raw model (sample planarity unknown).
+        Afterwards: a tighter window around the planarity-anchored
+        model."""
         model_deg = self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
         if self._anchor.offset_deg is None:
             window_deg = self._cfg.plausibility_window_deg
@@ -944,12 +1129,28 @@ class AlignmentSequence:
             if fit is not None:
                 fit_map = asdict(fit)
                 fit_map["milling_angle_deg"] = fit.milling_angle_deg
+            # Schema 3 records the stage X/Y/R read-back and the
+            # centering transform's own parameters, so a bench corpus
+            # can measure the per-axis loop gain offline and
+            # independently of the fit.
+            stage = self._ops.stage.current_position()
             sidecar = {
-                "schema": 2,
+                "schema": 3,
                 "frame_index": self._frames,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "phase": self._phase_label,
                 "stage_tilt_deg": self._tilt_deg,
+                "stage_x_m": stage.x_m,
+                "stage_y_m": stage.y_m,
+                "stage_r_deg": stage.r_deg,
+                "beam_shift_m": list(self._ops.ion_beam.beam_shift_m()),
+                "deprojection_enabled": (
+                    self._cfg.stage_y_deprojection_enabled),
+                "deprojection_gain": self._deprojection_gain(),
+                "stage_sign_x": self._cfg.stage_sign_x,
+                "stage_sign_y": self._cfg.stage_sign_y,
+                "beam_shift_sign_x": self._cfg.beam_shift_sign_x,
+                "beam_shift_sign_y": self._cfg.beam_shift_sign_y,
                 "model_milling_angle_deg": (
                     self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG),
                 "planarity_offset_deg": self._anchor.offset_deg,
@@ -1040,6 +1241,19 @@ class AlignmentSequence:
                         "failed; check the FIB view, then press Start "
                         "to retry")
 
+    def _measure_median(self, count: int) -> EllipseFit:
+        """``count`` ladder measurements, decided by the median angle —
+        the same rule as verification, so the closed tilt loop and the
+        final verdict cannot disagree about what a site measures. The
+        returned fit is the median frame itself (an actual measurement,
+        never a synthetic average); ``count`` = 1 degenerates to a plain
+        :meth:`_measure_required`."""
+        if count <= 1:
+            return self._measure_required()
+        fits = [self._measure_required() for _ in range(count)]
+        fits.sort(key=lambda item: item.milling_angle_deg)
+        return fits[len(fits) // 2]
+
     def _acquire_lock_in_place(self) -> Optional[EllipseFit]:
         """Bounded same-tilt re-acquisition: two grabs, one auto-C/B,
         two more grabs, each accepted fit feeding the (cleared) anchor
@@ -1053,9 +1267,11 @@ class AlignmentSequence:
                 return fit
         return None
 
-    def _gate_fit(self, fit: EllipseFit) -> Optional[str]:
+    def _gate_fit(self, fit: EllipseFit) -> Optional[_GateRejection]:
         """None when the fit passes every gate, else the rejection
-        reason (logged here, and recorded in the debug sidecar)."""
+        (reason logged here and recorded in the debug sidecar;
+        ``width_um`` set only by the pre-anchor width gate, feeding the
+        wrong-entry advisory)."""
         cfg = self._cfg
         # rms scales with the detector's width-rescaled inlier
         # tolerance, so the ceiling must follow the frame width too.
@@ -1066,26 +1282,27 @@ class AlignmentSequence:
         if (fit.n_inliers < cfg.fit_min_inliers
                 or fit.coverage < cfg.fit_min_coverage
                 or fit.rms_px > max_rms_px):
-            reason = (f"quality inliers={fit.n_inliers} "
-                      f"coverage={fit.coverage:.2f} rms={fit.rms_px:.2f}")
             logger.info("Fit rejected by quality gates: inliers=%d "
                         "coverage=%.2f rms=%.2f", fit.n_inliers,
                         fit.coverage, fit.rms_px)
-            return reason
+            return _GateRejection(
+                f"quality inliers={fit.n_inliers} "
+                f"coverage={fit.coverage:.2f} rms={fit.rms_px:.2f}")
         low_deg, high_deg = self._angle_window_deg()
         if not low_deg <= fit.milling_angle_deg <= high_deg:
             logger.info(
                 "Fit rejected as implausible: measured %.2f deg vs "
                 "window [%.2f, %.2f] deg at stage tilt %.2f deg",
                 fit.milling_angle_deg, low_deg, high_deg, self._tilt_deg)
-            return (f"implausible measured={fit.milling_angle_deg:.2f} "
-                    f"window=[{low_deg:.2f}, {high_deg:.2f}]")
+            return _GateRejection(
+                f"implausible measured={fit.milling_angle_deg:.2f} "
+                f"window=[{low_deg:.2f}, {high_deg:.2f}]")
         if self._anchor.offset_deg is None:
-            # Anchor-candidate plausibility cap, STRICTER than the
+            # Anchor-candidate plausibility cap, stricter than the
             # search window and applied in the gate so the best-first
             # candidate iteration falls through a persistent decoy to
-            # the true ring (run 1's -2.97 deg clutter passed the
-            # window and would have anchored again).
+            # the true ring — clutter that passes the search window
+            # would otherwise re-anchor on every attempt.
             model_deg = self._tilt_deg + FIB_ANGLE_FROM_STAGE_PLANE_DEG
             offset_deg = fit.milling_angle_deg - model_deg
             if abs(offset_deg) > cfg.anchor_max_offset_deg:
@@ -1093,8 +1310,9 @@ class AlignmentSequence:
                     "Fit rejected as an anchor candidate: implied "
                     "planarity offset %+.2f deg exceeds the %.1f deg "
                     "cap", offset_deg, cfg.anchor_max_offset_deg)
-                return (f"anchor_offset {offset_deg:+.2f} deg exceeds "
-                        f"±{cfg.anchor_max_offset_deg:.1f}")
+                return _GateRejection(
+                    f"anchor_offset {offset_deg:+.2f} deg exceeds "
+                    f"±{cfg.anchor_max_offset_deg:.1f}")
         if self._last_pixel_size_m > 0:
             width_um = (2.0 * fit.semi_major_px
                         * self._last_pixel_size_m * 1e6)
@@ -1109,8 +1327,10 @@ class AlignmentSequence:
                         "Fit rejected by the AOI width gate: measured "
                         "width %.0f um vs expected %.0f um", width_um,
                         entered_um)
-                    return (f"aoi_width {width_um:.0f} um vs "
-                            f"expected {entered_um:.0f} um")
+                    return _GateRejection(
+                        f"aoi_width {width_um:.0f} um vs "
+                        f"expected {entered_um:.0f} um",
+                        width_um=width_um)
             elif self._working_aoi_diameter_um > 0:
                 # Post-anchor the run tracks the measured (working)
                 # width; the band derives from the detector's own
@@ -1125,8 +1345,9 @@ class AlignmentSequence:
                         "Fit rejected by the AOI width gate: measured "
                         "width %.0f um vs working %.0f um", width_um,
                         working_um)
-                    return (f"aoi_width {width_um:.0f} um vs "
-                            f"working {working_um:.0f} um")
+                    return _GateRejection(
+                        f"aoi_width {width_um:.0f} um vs "
+                        f"working {working_um:.0f} um")
         return None
 
     def _offset_m(self, fit: EllipseFit) -> Tuple[float, float]:
@@ -1135,13 +1356,102 @@ class AlignmentSequence:
         return ((fit.center_x_px - width / 2.0) * self._last_pixel_size_m,
                 (fit.center_y_px - height / 2.0) * self._last_pixel_size_m)
 
-    def _image_to_world(self, dx_m: float,
-                        dy_m: float) -> Tuple[float, float]:
-        """Rotate an image-frame offset back through the scan rotation."""
+    def _image_to_beam_plane(self, dx_m: float,
+                             dy_m: float) -> Tuple[float, float]:
+        """De-rotate an image-frame offset into the beam plane.
+
+        Returns ``(p, q)``: ``p`` along the projected stage tilt axis,
+        ``q`` along the projected perpendicular. The scan rotation
+        rotates the raster within the beam plane, so undoing it here
+        leaves a frame whose axes are fixed by the tilt geometry — which
+        is what makes the de-projection in
+        :meth:`_stage_move_for_offset` well defined at any scan
+        rotation. (De-projecting image Y directly would be right only at
+        0/180 deg and exactly wrong at 90 deg.)
+        """
         rotation_deg = self._ops.ion_beam.scan_rotation_deg()
         c = math.cos(math.radians(rotation_deg))
         s = math.sin(math.radians(rotation_deg))
         return (c * dx_m + s * dy_m, -s * dx_m + c * dy_m)
+
+    def _deprojection_gain(self) -> float:
+        """1 / sin(beta): how much further the stage must move in the
+        specimen plane than the beam plane shows.
+
+        beta is the anchored model angle — the center of the acceptance
+        window, so the gain, the detector prior and the plausibility
+        gate can never disagree. Deliberately not the target angle (the
+        search can end many degrees away from it, and _keep_in_view runs
+        at every intermediate tilt) and not the fit's own b/a: an
+        actuation gain must never be a function of the measurement it is
+        correcting, or a fit with a 30% low minor axis would both
+        misstate the offset and inflate the correction.
+        """
+        if not self._cfg.stage_y_deprojection_enabled:
+            return 1.0
+        low_deg, high_deg = self._angle_window_deg()
+        beta_deg = max((low_deg + high_deg) / 2.0,
+                       self._cfg.deprojection_min_angle_deg)
+        return 1.0 / math.sin(math.radians(beta_deg))
+
+    def _stage_move_for_offset(self, p_m: float,
+                               q_m: float) -> Tuple[float, float]:
+        """Beam-plane correction -> specimen-plane stage move.
+
+        The stage moves in the specimen plane, which the grazing FIB
+        view sees foreshortened along the perpendicular axis by
+        sin(beta) — the same projection that makes the circular AOI an
+        ellipse with b/a = sin(beta). One number governs both, so they
+        cannot disagree. p (along the tilt axis) is unforeshortened and
+        passes through 1:1; q is divided by sin(beta).
+
+        The result is capped at ``stage_move_max_m`` by uniform scaling,
+        so a bad fit cannot turn the ~14x Y gain into a wild excursion
+        while a legitimate correction keeps its direction.
+        """
+        dx_m, dy_m = p_m, q_m * self._deprojection_gain()
+        magnitude = math.hypot(dx_m, dy_m)
+        cap_m = self._cfg.stage_move_max_m
+        if magnitude > cap_m:
+            scale = cap_m / magnitude
+            logger.warning(
+                "Commanded stage move %.0f um exceeds the %.0f um "
+                "per-move cap; scaling to the cap (direction preserved)",
+                magnitude * 1e6, cap_m * 1e6)
+            dx_m, dy_m = dx_m * scale, dy_m * scale
+        return (dx_m, dy_m)
+
+    def _centered(self, offset_x_m: float, offset_y_m: float,
+                  tolerance_m: float) -> bool:
+        """Is the ellipse centered to ``tolerance_m``?
+
+        Per axis once the de-projection is enabled: a combined hypot
+        lets a converged X hide a Y residual the loop cannot actually
+        move. The tolerance stays in image space for both axes: the
+        operator-visible symptom, the detector's centered-geometry
+        priors, and the verification criterion are all image-space
+        facts, and a specimen-plane Y tolerance would be ~2 px in the
+        image — below the fit's own center repeatability.
+        """
+        if self._cfg.stage_y_deprojection_enabled:
+            return (abs(offset_x_m) <= tolerance_m
+                    and abs(offset_y_m) <= tolerance_m)
+        return math.hypot(offset_x_m, offset_y_m) <= tolerance_m
+
+    def _offset_plausible(self, offset_x_m: float, offset_y_m: float,
+                          label: str) -> bool:
+        """False when the measured offset is too large to be a real
+        excursion (clutter, or a fit on the wrong structure)."""
+        ceiling_m = (self._cfg.center_offset_max_frac_of_hfw
+                     * self._expected_hfw_m)
+        if ceiling_m <= 0 or math.hypot(offset_x_m, offset_y_m) <= ceiling_m:
+            return True
+        logger.warning(
+            "%s: measured center offset (%.1f, %.1f) um exceeds the "
+            "%.0f um sanity ceiling; treating as a failed detection "
+            "rather than commanding a move", label, offset_x_m * 1e6,
+            offset_y_m * 1e6, ceiling_m * 1e6)
+        return False
 
     def _stage_tolerance_m(self) -> float:
         return max(self._cfg.center_tolerance_frac_of_hfw
@@ -1231,3 +1541,12 @@ class AlignmentSequence:
 
 def _clamp(value: float, magnitude: float) -> float:
     return max(-magnitude, min(magnitude, value))
+
+
+def _applied_fraction(requested: float, applied: float) -> float:
+    """How much of a requested correction actually got through (1.0 when
+    nothing was clamped). Sign-agnostic, so the caller never divides by
+    a direction sign to recover the leftover."""
+    if abs(requested) < 1e-15:
+        return 1.0
+    return applied / requested
