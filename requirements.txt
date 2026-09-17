@@ -1,3 +1,17 @@
-PySide6
-numpy
-opencv-python
+# ASV Spin Mill Angle Calculator 3.x - runtime dependencies (Python 3.11).
+#
+# Baseline: the Thermo Fisher AutoScript 4.14 Python environment (Enthought,
+# Python 3.11.14) ships PySide6 6.7.1, numpy 2.2.5 and an Enthought build of
+# OpenCV 4.8.1; the application is developed and tested there. Do not
+# pip-install this file into that environment: it already provides these
+# packages, and pip would replace the vendor OpenCV build.
+#
+# Standalone (simulation mode / development): install into a fresh venv.
+#
+# Controlling a microscope additionally requires the AutoScript SDK
+# (autoscript-sdb-microscope-client >= 4.14). It is installed by the Thermo
+# Fisher AutoScript installer and is not available on PyPI.
+
+PySide6>=6.7.1
+numpy>=2.2.5
+opencv-python>=4.8.1
