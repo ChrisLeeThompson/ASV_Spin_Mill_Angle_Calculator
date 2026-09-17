@@ -1,8 +1,13 @@
 # ASV Spin Mill Angle Calculator
 
-<!-- Full documentation: https://<site>/scripts/asv_spin_mill_angle_calculator/ (enable this link when the site is live) -->
+> [!NOTE]
+> **Full documentation:** https://chrisleethompson.github.io/scripts/asv_spin_mill_angle_calculator/
 
 A PySide6/QML desktop utility that assists setup of Thermo Scientific Auto Slice and View (ASV) spin milling on the Hydra Bio plasma FIB-SEM. It calculates the stage tilt and rotation needed for a target milling angle, analyzes FIB spin-mill position images, and can align a position automatically through the Thermo Scientific AutoScript SDK.
+
+## Documentation
+
+Full documentation: https://chrisleethompson.github.io/scripts/asv_spin_mill_angle_calculator/
 
 ## Features
 
